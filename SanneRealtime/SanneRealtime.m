@@ -1,26 +1,17 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <AVFAudio/AVFAudio.h>
-#import <AudioToolbox/AudioToolbox.h>
-#import <Accelerate/Accelerate.h>
 
-static AVAudioEngine *engine = nil;
-static AVAudioPlayerNode *player = nil;
-static AVAudioUnitTimePitch *pitch = nil;
-
-static BOOL running = NO;
-static BOOL injectionReady = NO;
-
-static void Popup(NSString *text) {
-
+static void SRPopup(NSString *message)
+{
     dispatch_async(dispatch_get_main_queue(), ^{
 
         UIWindow *window = nil;
 
         if (@available(iOS 13.0, *)) {
 
-            for (UIScene *scene
-                 in UIApplication.sharedApplication.connectedScenes) {
+            for (UIScene *scene in
+                 UIApplication.sharedApplication.connectedScenes) {
 
                 if (scene.activationState !=
                     UISceneActivationStateForegroundActive)
@@ -47,23 +38,22 @@ static void Popup(NSString *text) {
         if (!window)
             return;
 
-        UIViewController *vc =
-            window.rootViewController;
+        UIViewController *vc = window.rootViewController;
 
         while (vc.presentedViewController)
             vc = vc.presentedViewController;
 
         UIAlertController *alert =
-            [UIAlertController
-                alertControllerWithTitle:@"SanneRealtime"
-                message:text
-                preferredStyle:UIAlertControllerStyleAlert];
+        [UIAlertController
+         alertControllerWithTitle:@"SanneRealtime"
+         message:message
+         preferredStyle:UIAlertControllerStyleAlert];
 
         [alert addAction:
-            [UIAlertAction
-                actionWithTitle:@"OK"
-                style:UIAlertActionStyleDefault
-                handler:nil]];
+         [UIAlertAction
+          actionWithTitle:@"OK"
+          style:UIAlertActionStyleDefault
+          handler:nil]];
 
         [vc presentViewController:alert
                           animated:YES
@@ -72,370 +62,321 @@ static void Popup(NSString *text) {
 }
 
 
-/*
- * Stop everything cleanly.
- */
-static void StopRealtime(void) {
+static NSString *SRPermissionString(void)
+{
+    if (@available(iOS 18.2, *)) {
 
-    if (!running)
-        return;
+        AVAudioApplicationMicrophoneInjectionPermission p =
+            AVAudioApplication.sharedInstance.microphoneInjectionPermission;
 
-    NSLog(@"[SanneRealtime] Stopping realtime engine.");
+        switch (p) {
 
-    if (player) {
-        [player stop];
-    }
+            case AVAudioApplicationMicrophoneInjectionPermissionGranted:
+                return @"GRANTED";
 
-    if (engine) {
-        [engine stop];
-        [engine reset];
-    }
+            case AVAudioApplicationMicrophoneInjectionPermissionDenied:
+                return @"DENIED";
 
-    engine = nil;
-    player = nil;
-    pitch = nil;
+            case AVAudioApplicationMicrophoneInjectionPermissionUndetermined:
+                return @"UNDETERMINED";
 
-    running = NO;
-}
-
-
-/*
- * Start the realtime processing graph.
- *
- * IMPORTANT:
- * We do NOT change Discord's AVAudioSession
- * category or activate/deactivate it.
- */
-static void StartRealtime(void) {
-
-    if (running)
-        return;
-
-    if (!injectionReady)
-        return;
-
-    NSLog(@"[SanneRealtime] Starting realtime processor.");
-
-    engine =
-        [[AVAudioEngine alloc] init];
-
-    AVAudioInputNode *input =
-        engine.inputNode;
-
-    AVAudioFormat *inputFormat =
-        [input inputFormatForBus:0];
-
-    if (!inputFormat ||
-        inputFormat.sampleRate <= 0 ||
-        inputFormat.channelCount == 0) {
-
-        NSLog(
-            @"[SanneRealtime] Invalid input format."
-        );
-
-        Popup(
-            @"REALTIME FAILED\n\n"
-             "Could not obtain microphone format."
-        );
-
-        StopRealtime();
-        return;
-    }
-
-
-    NSLog(
-        @"[SanneRealtime] Input %.0f Hz / %u channels",
-        inputFormat.sampleRate,
-        inputFormat.channelCount
-    );
-
-
-    /*
-     * Female-style pitch test.
-     *
-     * +500 cents = +5 semitones.
-     *
-     * This is deliberately NOT Sanne AI yet.
-     */
-    pitch =
-        [[AVAudioUnitTimePitch alloc] init];
-
-    pitch.pitch = 500.0;
-    pitch.rate = 1.0;
-
-
-    player =
-        [[AVAudioPlayerNode alloc] init];
-
-
-    [engine attachNode:pitch];
-    [engine attachNode:player];
-
-
-    /*
-     * Mic
-     *  ↓
-     * TimePitch
-     *  ↓
-     * Player
-     */
-    [engine
-        connect:input
-        to:pitch
-        format:inputFormat];
-
-    [engine
-        connect:pitch
-        to:player
-        format:inputFormat];
-
-
-    /*
-     * Capture the microphone continuously.
-     *
-     * We deliberately don't modify the buffers here yet.
-     * The purpose of this first live test is proving that
-     * the realtime processing graph can remain alive.
-     */
-    [input
-        installTapOnBus:0
-        bufferSize:1024
-        format:inputFormat
-        block:^(AVAudioPCMBuffer *buffer,
-                AVAudioTime *when) {
-
-            if (!running)
-                return;
-
-            NSLog(
-                @"[SanneRealtime] PCM %.0f Hz, frames=%u",
-                buffer.format.sampleRate,
-                buffer.frameLength
-            );
-        }];
-
-
-    NSError *error = nil;
-
-    if (![engine startAndReturnError:&error]) {
-
-        NSLog(
-            @"[SanneRealtime] Engine start failed: %@",
-            error.localizedDescription
-        );
-
-        Popup(
-            [NSString stringWithFormat:
-                @"REALTIME ENGINE FAILED\n\n%@",
-                error.localizedDescription
-                    ?: @"Unknown error"]
-        );
-
-        StopRealtime();
-        return;
-    }
-
-
-    [player play];
-
-    running = YES;
-
-    NSLog(
-        @"[SanneRealtime] REALTIME PROCESSOR RUNNING."
-    );
-
-
-    Popup(
-        @"REALTIME PROCESSOR RUNNING\n\n"
-         "Male → +500 cents\n\n"
-         "Speak normally.\n\n"
-         "This is the first live-processing test."
-    );
-}
-
-
-/*
- * Called when iOS reports that microphone injection
- * became available.
- */
-static void CheckInjection(void) {
-
-    if (!@available(iOS 18.2, *))
-        return;
-
-    AVAudioSession *session =
-        [AVAudioSession sharedInstance];
-
-    if (!session.isMicrophoneInjectionAvailable) {
-
-        injectionReady = NO;
-
-        StopRealtime();
-
-        NSLog(
-            @"[SanneRealtime] Injection unavailable."
-        );
-
-        return;
-    }
-
-
-    NSError *error = nil;
-
-    BOOL result =
-        [session
-            setPreferredMicrophoneInjectionMode:
-                AVAudioSessionMicrophoneInjectionModeSpokenAudio
-            error:&error];
-
-    if (!result) {
-
-        NSLog(
-            @"[SanneRealtime] SpokenAudio failed: %@",
-            error.localizedDescription
-        );
-
-        Popup(
-            [NSString stringWithFormat:
-                @"SPOKEN AUDIO FAILED\n\n%@",
-                error.localizedDescription
-                    ?: @"Unknown error"]
-        );
-
-        return;
-    }
-
-
-    injectionReady = YES;
-
-    NSLog(
-        @"[SanneRealtime] SpokenAudio enabled."
-    );
-
-
-    /*
-     * Wait a moment for the call's audio route to settle.
-     */
-    dispatch_after(
-        dispatch_time(
-            DISPATCH_TIME_NOW,
-            500 * NSEC_PER_MSEC
-        ),
-        dispatch_get_main_queue(),
-        ^{
-
-            StartRealtime();
+            case AVAudioApplicationMicrophoneInjectionPermissionServiceDisabled:
+                return @"SERVICE DISABLED";
         }
-    );
+    }
+
+    return @"UNAVAILABLE";
 }
 
 
-/*
- * Watch for Discord call state changes.
- */
-static void InstallInjectionObserver(void) {
+static NSString *SRRouteDescription(AVAudioSessionRouteDescription *route)
+{
+    NSMutableString *result =
+        [NSMutableString string];
 
-    if (!@available(iOS 18.2, *))
-        return;
+    [result appendFormat:
+        @"INPUTS: %lu\n",
+        (unsigned long)route.inputs.count];
 
-    [[NSNotificationCenter defaultCenter]
-        addObserverForName:
-            AVAudioSessionMicrophoneInjectionCapabilitiesChangeNotification
-        object:nil
-        queue:NSOperationQueue.mainQueue
-        usingBlock:^(NSNotification *note) {
+    for (AVAudioSessionPortDescription *port in route.inputs) {
 
-            AVAudioSession *session =
-                [AVAudioSession sharedInstance];
+        [result appendFormat:
+            @"  INPUT: %@ | %@ | channels=%lu\n",
+            port.portType ?: @"?",
+            port.portName ?: @"?",
+            (unsigned long)port.channels.count];
+    }
 
-            BOOL available =
-                session.isMicrophoneInjectionAvailable;
+    [result appendFormat:
+        @"OUTPUTS: %lu\n",
+        (unsigned long)route.outputs.count];
 
-            NSLog(
-                @"[SanneRealtime] Injection capability: %@",
-                available ? @"YES" : @"NO"
-            );
+    for (AVAudioSessionPortDescription *port in route.outputs) {
 
+        [result appendFormat:
+            @"  OUTPUT: %@ | %@ | channels=%lu\n",
+            port.portType ?: @"?",
+            port.portName ?: @"?",
+            (unsigned long)port.channels.count];
+    }
 
-            if (available) {
-
-                CheckInjection();
-
-            } else {
-
-                injectionReady = NO;
-
-                StopRealtime();
-            }
-        }];
+    return result;
 }
 
 
-/*
- * Permission.
- */
-static void RequestPermission(void) {
-
+static void SRInspectAudio(void)
+{
     if (!@available(iOS 18.2, *)) {
-        Popup(@"iOS 18.2+ required.");
+
+        SRPopup(@"iOS 18.2+ required.");
         return;
     }
 
 
     AVAudioApplication *application =
-        [AVAudioApplication sharedInstance];
+        AVAudioApplication.sharedInstance;
+
+    AVAudioSession *session =
+        AVAudioSession.sharedInstance;
 
 
-    if (application.microphoneInjectionPermission ==
-        AVAudioApplicationMicrophoneInjectionPermissionGranted) {
+    BOOL injectionAvailable =
+        session.isMicrophoneInjectionAvailable;
 
-        CheckInjection();
+
+    NSString *permission =
+        SRPermissionString();
+
+
+    NSString *category =
+        session.category ?: @"?";
+
+
+    NSString *mode =
+        session.mode ?: @"?";
+
+
+    double sampleRate =
+        session.sampleRate;
+
+
+    double IOBuffer =
+        session.IOBufferDuration;
+
+
+    NSInteger inputChannels =
+        session.inputNumberOfChannels;
+
+
+    BOOL inputAvailable =
+        session.isInputAvailable;
+
+
+    AVAudioSessionRouteDescription *route =
+        session.currentRoute;
+
+
+    NSString *routeInfo =
+        SRRouteDescription(route);
+
+
+    NSString *preferredInput =
+        session.preferredInput
+        ? [NSString stringWithFormat:
+           @"%@ | %@",
+           session.preferredInput.portType ?: @"?",
+           session.preferredInput.portName ?: @"?"]
+        : @"NONE";
+
+
+    BOOL otherAudio =
+        session.isOtherAudioPlaying;
+
+
+    BOOL recordPermission =
+        (application.recordPermission ==
+         AVAudioApplicationRecordPermissionGranted);
+
+
+    NSString *message =
+    [NSString stringWithFormat:
+
+     @"INJECTION PERMISSION: %@\n"
+     @"INJECTION AVAILABLE: %@\n\n"
+
+     @"RECORD PERMISSION: %@\n"
+     @"INPUT AVAILABLE: %@\n"
+     @"INPUT CHANNELS: %ld\n\n"
+
+     @"CATEGORY: %@\n"
+     @"MODE: %@\n"
+     @"SAMPLE RATE: %.1f Hz\n"
+     @"IO BUFFER: %.4f sec\n\n"
+
+     @"PREFERRED INPUT: %@\n"
+     @"OTHER AUDIO PLAYING: %@\n\n"
+
+     @"CURRENT ROUTE\n%@",
+
+     permission,
+
+     injectionAvailable
+        ? @"YES"
+        : @"NO",
+
+     recordPermission
+        ? @"GRANTED"
+        : @"NOT GRANTED",
+
+     inputAvailable
+        ? @"YES"
+        : @"NO",
+
+     (long)inputChannels,
+
+     category,
+
+     mode,
+
+     sampleRate,
+
+     IOBuffer,
+
+     preferredInput,
+
+     otherAudio
+        ? @"YES"
+        : @"NO",
+
+     routeInfo];
+
+
+    NSLog(
+        @"[SanneRealtime]\n%@",
+        message
+    );
+
+
+    SRPopup(message);
+}
+
+
+static void SRSetInjectionMode(void)
+{
+    if (!@available(iOS 18.2, *))
+        return;
+
+
+    AVAudioSession *session =
+        AVAudioSession.sharedInstance;
+
+
+    if (!session.isMicrophoneInjectionAvailable) {
+
+        SRPopup(
+            @"Injection is currently NOT AVAILABLE.\n\n"
+             "Start the Discord call and try again."
+        );
+
         return;
     }
 
 
-    [AVAudioApplication
-        requestMicrophoneInjectionPermissionWithCompletionHandler:
-        ^(AVAudioApplicationMicrophoneInjectionPermission result) {
+    NSError *error = nil;
 
-            dispatch_async(
-                dispatch_get_main_queue(),
-                ^{
 
-                    if (result ==
-                        AVAudioApplicationMicrophoneInjectionPermissionGranted) {
+    BOOL success =
+        [session
+         setPreferredMicrophoneInjectionMode:
+            AVAudioSessionMicrophoneInjectionModeSpokenAudio
+         error:&error];
 
-                        CheckInjection();
 
-                    } else {
+    if (!success) {
 
-                        Popup(
-                            @"MICROPHONE INJECTION PERMISSION "
-                             "WAS NOT GRANTED."
-                        );
-                    }
-                }
-            );
-        }];
+        SRPopup(
+            [NSString stringWithFormat:
+                @"SPOKEN AUDIO FAILED\n\n%@",
+                error.localizedDescription
+                ?: @"Unknown error"]
+        );
+
+        return;
+    }
+
+
+    SRPopup(
+        @"SPOKEN AUDIO MODE SET.\n\n"
+         "No microphone engine was started.\n"
+         "No audio session was taken over."
+    );
 }
 
 
-/*
- * Constructor.
- */
+static void SRRun(void)
+{
+    if (!@available(iOS 18.2, *)) {
+
+        SRPopup(@"iOS 18.2+ required.");
+        return;
+    }
+
+
+    /*
+     * IMPORTANT:
+     *
+     * We intentionally do NOT:
+     *
+     * - create AVAudioEngine
+     * - access inputNode
+     * - install a tap
+     * - change category
+     * - change mode
+     * - activate the session
+     * - deactivate the session
+     *
+     * We only inspect the existing session.
+     */
+
+
+    SRInspectAudio();
+
+
+    dispatch_after(
+        dispatch_time(
+            DISPATCH_TIME_NOW,
+            800 * NSEC_PER_MSEC
+        ),
+        dispatch_get_main_queue(),
+        ^{
+
+            SRSetInjectionMode();
+        }
+    );
+}
+
+
 __attribute__((constructor))
-static void SanneRealtimeLoaded(void) {
-
+static void SanneRealtimeLoaded(void)
+{
     NSLog(
-        @"[SanneRealtime] ======================="
+        @"[SanneRealtime] ========================="
     );
 
     NSLog(
-        @"[SanneRealtime] LIVE FEMALE DSP BUILD"
+        @"[SanneRealtime] AUDIO ROUTE DIAGNOSTIC BUILD"
     );
 
     NSLog(
-        @"[SanneRealtime] ======================="
+        @"[SanneRealtime] NO AVAudioEngine"
+    );
+
+    NSLog(
+        @"[SanneRealtime] NO MICROPHONE CAPTURE"
+    );
+
+    NSLog(
+        @"[SanneRealtime] ========================="
     );
 
 
@@ -443,21 +384,15 @@ static void SanneRealtimeLoaded(void) {
         dispatch_get_main_queue(),
         ^{
 
-            InstallInjectionObserver();
-
-
-            /*
-             * Give Discord time to establish the call.
-             */
             dispatch_after(
                 dispatch_time(
                     DISPATCH_TIME_NOW,
-                    2 * NSEC_PER_SEC
+                    1500 * NSEC_PER_MSEC
                 ),
                 dispatch_get_main_queue(),
                 ^{
 
-                    RequestPermission();
+                    SRRun();
                 }
             );
         }
