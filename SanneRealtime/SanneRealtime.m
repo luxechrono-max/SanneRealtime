@@ -2,19 +2,11 @@
 #import <UIKit/UIKit.h>
 #import <AVFAudio/AVFAudio.h>
 
-static AVSpeechSynthesizer *gSynth = nil;
-
-static BOOL gObserversStarted = NO;
-static BOOL gInjectionEnabledForCurrentCall = NO;
-static BOOL gTestVoiceStartedForCurrentCall = NO;
-static BOOL gWaitingForUsableAudio = NO;
-static BOOL gCheckScheduled = NO;
-
-static NSInteger gCallGeneration = 0;
-
 static NSMutableArray<NSString *> *gRuntimeLog = nil;
 
-#pragma mark - Logging
+static BOOL gObserversStarted = NO;
+static BOOL gHasAudioEvents = NO;
+static BOOL gShowingReport = NO;
 
 static void SRRecordLog(NSString *message)
 {
@@ -37,14 +29,15 @@ static void SRRecordLog(NSString *message)
 
     [gRuntimeLog addObject:entry];
 
-    while (gRuntimeLog.count > 60) {
+    while (gRuntimeLog.count > 80) {
         [gRuntimeLog removeObjectAtIndex:0];
     }
 
-    NSLog(@"[SanneRealtime] %@", entry);
+    NSLog(
+        @"[SanneRealtime] %@",
+        entry
+    );
 }
-
-#pragma mark - Popup
 
 static void SRPopup(NSString *message)
 {
@@ -108,8 +101,6 @@ static void SRPopup(NSString *message)
     });
 }
 
-#pragma mark - Permission
-
 static NSString *SRPermissionString(void)
 {
     if (@available(iOS 18.2, *)) {
@@ -135,8 +126,6 @@ static NSString *SRPermissionString(void)
 
     return @"UNAVAILABLE";
 }
-
-#pragma mark - Route
 
 static NSString *SRPortDescription(
     AVAudioSessionPortDescription *port
@@ -198,44 +187,6 @@ static NSString *SRRouteDescription(
     return result;
 }
 
-#pragma mark - Audio State
-
-static BOOL SRIsDiscordVoiceStateReady(void)
-{
-    if (!@available(iOS 18.2, *))
-        return NO;
-
-    AVAudioSession *session =
-        AVAudioSession.sharedInstance;
-
-    NSString *category =
-        session.category ?: @"";
-
-    NSString *mode =
-        session.mode ?: @"";
-
-    BOOL categoryReady =
-        [category isEqualToString:
-            AVAudioSessionCategoryPlayAndRecord];
-
-    BOOL modeReady =
-        [mode isEqualToString:
-            AVAudioSessionModeVoiceChat];
-
-    BOOL inputReady =
-        session.isInputAvailable &&
-        session.inputNumberOfChannels > 0;
-
-    BOOL injectionReady =
-        session.isMicrophoneInjectionAvailable;
-
-    return
-        categoryReady &&
-        modeReady &&
-        inputReady &&
-        injectionReady;
-}
-
 static NSString *SRSessionDiagnostic(void)
 {
     if (!@available(iOS 18.2, *))
@@ -243,9 +194,6 @@ static NSString *SRSessionDiagnostic(void)
 
     AVAudioSession *session =
         AVAudioSession.sharedInstance;
-
-    AVAudioSessionRouteDescription *route =
-        session.currentRoute;
 
     return [NSString stringWithFormat:
 
@@ -256,8 +204,7 @@ static NSString *SRSessionDiagnostic(void)
          "SAMPLE RATE: %.2f\n"
          "INPUT LATENCY: %.6f\n"
          "OUTPUT LATENCY: %.6f\n"
-         "INJECTION AVAILABLE: %@\n"
-         "READY FOR DISCORD VOICE: %@\n\n"
+         "INJECTION AVAILABLE: %@\n\n"
          "%@",
 
         session.category ?: @"?",
@@ -279,287 +226,91 @@ static NSString *SRSessionDiagnostic(void)
             ? @"YES"
             : @"NO",
 
-        SRIsDiscordVoiceStateReady()
-            ? @"YES"
-            : @"NO",
-
-        SRRouteDescription(route)
+        SRRouteDescription(
+            session.currentRoute
+        )
     ];
 }
 
-#pragma mark - Female Test Voice
-
-static AVSpeechSynthesisVoice *SRFemaleVoice(void)
-{
-    if (@available(iOS 13.0, *)) {
-
-        NSArray<AVSpeechSynthesisVoice *> *voices =
-            [AVSpeechSynthesisVoice speechVoices];
-
-        for (AVSpeechSynthesisVoice *voice
-             in voices) {
-
-            if (voice.gender ==
-                    AVSpeechSynthesisVoiceGenderFemale &&
-                [voice.language hasPrefix:@"en"]) {
-
-                return voice;
-            }
-        }
-    }
-
-    return [AVSpeechSynthesisVoice
-        voiceWithLanguage:@"en-US"];
-}
-
-static void SRSpeakKnownGoodTest(void)
-{
-    if (!gSynth)
-        gSynth =
-            [[AVSpeechSynthesizer alloc] init];
-
-    AVSpeechUtterance *utterance =
-        [AVSpeechUtterance
-            speechUtteranceWithString:
-                @"Hello. This is the SanneRealtime female voice test."];
-
-    utterance.voice =
-        SRFemaleVoice();
-
-    utterance.rate = 0.48;
-    utterance.pitchMultiplier = 1.05;
-    utterance.volume = 1.0;
-
-    SRRecordLog(
-        @"CONTROL TEST: AVSpeechSynthesizer STARTED."
-    );
-
-    [gSynth speakUtterance:utterance];
-}
-
-#pragma mark - Enable SpokenAudio
-
-static BOOL SREnableSpokenAudio(void)
-{
-    if (!@available(iOS 18.2, *))
-        return NO;
-
-    AVAudioSession *session =
-        AVAudioSession.sharedInstance;
-
-    if (!SRIsDiscordVoiceStateReady()) {
-
-        SRRecordLog(
-            @"ENABLE SKIPPED: Discord voice state is not ready."
-        );
-
-        return NO;
-    }
-
-    NSError *error = nil;
-
-    BOOL success =
-        [session
-            setPreferredMicrophoneInjectionMode:
-                AVAudioSessionMicrophoneInjectionModeSpokenAudio
-            error:&error];
-
-    if (!success) {
-
-        SRRecordLog(
-            [NSString stringWithFormat:
-                @"SPOKEN AUDIO ENABLE FAILED: %@",
-                error.localizedDescription
-                    ?: @"Unknown error"]
-        );
-
-        return NO;
-    }
-
-    gInjectionEnabledForCurrentCall = YES;
-
-    SRRecordLog(
-        @"SPOKEN AUDIO INJECTION ENABLED FOR CURRENT CALL."
-    );
-
-    SRRecordLog(
-        [NSString stringWithFormat:
-            @"STATE AFTER ENABLE:\n%@",
-            SRSessionDiagnostic()]
-    );
-
-    return YES;
-}
-
-#pragma mark - Wait For Usable State
-
-static void SRCheckAudioState(void);
-
-static void SRScheduleAudioCheck(
+static void SRRecordSessionState(
     NSString *reason
 )
 {
-    if (gCheckScheduled)
-        return;
-
-    gCheckScheduled = YES;
+    gHasAudioEvents = YES;
 
     SRRecordLog(
         [NSString stringWithFormat:
-            @"AUDIO CHECK SCHEDULED: %@",
-            reason ?: @"unknown"]
-    );
-
-    dispatch_after(
-        dispatch_time(
-            DISPATCH_TIME_NOW,
-            300 * NSEC_PER_MSEC
-        ),
-        dispatch_get_main_queue(),
-        ^{
-
-            gCheckScheduled = NO;
-
-            SRCheckAudioState();
-        }
-    );
-}
-
-static void SRStartTestAfterReady(void)
-{
-    if (gTestVoiceStartedForCurrentCall)
-        return;
-
-    if (!SRIsDiscordVoiceStateReady())
-        return;
-
-    if (!gInjectionEnabledForCurrentCall) {
-
-        if (!SREnableSpokenAudio())
-            return;
-    }
-
-    gTestVoiceStartedForCurrentCall = YES;
-
-    SRRecordLog(
-        @"DISCORD VOICE STATE READY."
-    );
-
-    SRRecordLog(
-        @"WAITING 500 MS BEFORE CONTROL TEST."
-    );
-
-    SRPopup(
-        @"DISCORD AUDIO READY\n\n"
-         "SpokenAudio injection enabled.\n\n"
-         "Starting known-good female test voice."
-    );
-
-    NSInteger generation =
-        gCallGeneration;
-
-    dispatch_after(
-        dispatch_time(
-            DISPATCH_TIME_NOW,
-            500 * NSEC_PER_MSEC
-        ),
-        dispatch_get_main_queue(),
-        ^{
-
-            if (generation != gCallGeneration) {
-
-                SRRecordLog(
-                    @"TEST CANCELLED: CALL GENERATION CHANGED."
-                );
-
-                return;
-            }
-
-            if (!SRIsDiscordVoiceStateReady()) {
-
-                SRRecordLog(
-                    @"TEST CANCELLED: AUDIO STATE NO LONGER READY."
-                );
-
-                gTestVoiceStartedForCurrentCall = NO;
-
-                SRScheduleAudioCheck(
-                    @"STATE LOST BEFORE TEST"
-                );
-
-                return;
-            }
-
-            SRSpeakKnownGoodTest();
-        }
-    );
-}
-
-static void SRCheckAudioState(void)
-{
-    if (!@available(iOS 18.2, *))
-        return;
-
-    AVAudioSession *session =
-        AVAudioSession.sharedInstance;
-
-    NSString *category =
-        session.category ?: @"";
-
-    NSString *mode =
-        session.mode ?: @"";
-
-    BOOL categoryReady =
-        [category isEqualToString:
-            AVAudioSessionCategoryPlayAndRecord];
-
-    BOOL modeReady =
-        [mode isEqualToString:
-            AVAudioSessionModeVoiceChat];
-
-    BOOL inputReady =
-        session.isInputAvailable &&
-        session.inputNumberOfChannels > 0;
-
-    BOOL injectionReady =
-        session.isMicrophoneInjectionAvailable;
-
-    SRRecordLog(
-        [NSString stringWithFormat:
-            @"AUDIO CHECK\n"
-             "CATEGORY READY: %@\n"
-             "MODE READY: %@\n"
-             "INPUT READY: %@\n"
-             "INJECTION READY: %@",
-
-            categoryReady ? @"YES" : @"NO",
-            modeReady ? @"YES" : @"NO",
-            inputReady ? @"YES" : @"NO",
-            injectionReady ? @"YES" : @"NO"]
-    );
-
-    if (categoryReady &&
-        modeReady &&
-        inputReady &&
-        injectionReady) {
-
-        gWaitingForUsableAudio = NO;
-
-        SRStartTestAfterReady();
-
-        return;
-    }
-
-    gWaitingForUsableAudio = YES;
-
-    SRRecordLog(
-        [NSString stringWithFormat:
-            @"WAITING FOR USABLE DISCORD AUDIO.\n%@",
+            @"STATE: %@\n%@",
+            reason ?: @"UNKNOWN",
             SRSessionDiagnostic()]
     );
 }
 
-#pragma mark - Route Changes
+static void SRShowReport(void)
+{
+    if (gShowingReport)
+        return;
+
+    if (!gRuntimeLog ||
+        gRuntimeLog.count == 0)
+        return;
+
+    gShowingReport = YES;
+
+    NSMutableString *report =
+        [NSMutableString string];
+
+    [report appendString:
+        @"PASSIVE AUDIO REPORT\n\n"];
+
+    [report appendString:
+        @"IMPORTANT:\n"
+         "This build did NOT activate the audio session.\n"
+         "This build did NOT enable microphone injection.\n"
+         "This build did NOT play audio.\n"
+         "This build did NOT create AVAudioEngine.\n"
+         "This build only observed the session.\n\n"];
+
+    [report appendString:
+        @"RECENT EVENTS\n\n"];
+
+    NSUInteger startIndex = 0;
+
+    if (gRuntimeLog.count > 16) {
+
+        startIndex =
+            gRuntimeLog.count - 16;
+    }
+
+    for (NSUInteger i = startIndex;
+         i < gRuntimeLog.count;
+         i++) {
+
+        [report appendFormat:
+            @"%@\n\n",
+            gRuntimeLog[i]];
+    }
+
+    [report appendString:
+        @"CURRENT STATE\n\n"];
+
+    [report appendString:
+        SRSessionDiagnostic()];
+
+    if (report.length > 7000) {
+
+        report =
+            [NSMutableString
+                stringWithFormat:
+                    @"...LAST EVENTS...\n\n%@",
+                    [report substringFromIndex:
+                        report.length - 7000]];
+    }
+
+    SRPopup(report);
+
+    gShowingReport = NO;
+}
 
 static void SRHandleRouteChange(
     NSNotification *notification
@@ -570,57 +321,26 @@ static void SRHandleRouteChange(
             AVAudioSessionRouteChangeReasonKey
         ];
 
+    gHasAudioEvents = YES;
+
     SRRecordLog(
         [NSString stringWithFormat:
-            @"ROUTE CHANGE: %@",
+            @"ROUTE CHANGE\n"
+             "REASON: %@",
             reason ?: @"unknown"]
     );
 
-    SRRecordLog(
-        [NSString stringWithFormat:
-            @"STATE AFTER ROUTE CHANGE:\n%@",
-            SRSessionDiagnostic()]
-    );
-
-    /*
-     * A route change may temporarily produce zero
-     * input channels. Do not touch the session during
-     * that transient state.
-     */
-
-    if (!SRIsDiscordVoiceStateReady()) {
-
-        gInjectionEnabledForCurrentCall = NO;
-        gTestVoiceStartedForCurrentCall = NO;
-
-        SRScheduleAudioCheck(
-            @"ROUTE CHANGE"
-        );
-
-        return;
-    }
-
-    /*
-     * If Discord has now established its real
-     * PlayAndRecord / VoiceChat route, restore the
-     * preferred injection mode without activating
-     * or reconfiguring the session ourselves.
-     */
-
-    gInjectionEnabledForCurrentCall = NO;
-    gTestVoiceStartedForCurrentCall = NO;
-
-    SRScheduleAudioCheck(
-        @"ROUTE NOW USABLE"
+    SRRecordSessionState(
+        @"AFTER ROUTE CHANGE"
     );
 }
-
-#pragma mark - Injection Capability
 
 static void SRHandleCapabilityChange(
     NSNotification *notification
 )
 {
+    gHasAudioEvents = YES;
+
     AVAudioSession *session =
         AVAudioSession.sharedInstance;
 
@@ -633,7 +353,7 @@ static void SRHandleCapabilityChange(
         [NSString stringWithFormat:
             @"INJECTION CAPABILITY CHANGE\n"
              "NOTIFICATION: %@\n"
-             "SESSION: %@",
+             "CURRENT SESSION: %@",
 
             available
                 ? (available.boolValue
@@ -646,84 +366,55 @@ static void SRHandleCapabilityChange(
                 : @"NO"]
     );
 
-    SRRecordLog(
-        [NSString stringWithFormat:
-            @"STATE AFTER CAPABILITY CHANGE:\n%@",
-            SRSessionDiagnostic()]
+    SRRecordSessionState(
+        @"AFTER INJECTION CAPABILITY CHANGE"
     );
-
-    if (session.isMicrophoneInjectionAvailable) {
-
-        SRScheduleAudioCheck(
-            @"INJECTION BECAME AVAILABLE"
-        );
-
-    } else {
-
-        gInjectionEnabledForCurrentCall = NO;
-
-        SRRecordLog(
-            @"INJECTION LOST."
-        );
-    }
 }
-
-#pragma mark - Interruption
 
 static void SRHandleInterruption(
     NSNotification *notification
 )
 {
+    gHasAudioEvents = YES;
+
     NSNumber *type =
         notification.userInfo[
             AVAudioSessionInterruptionTypeKey
         ];
 
-    SRRecordLog(
-        [NSString stringWithFormat:
-            @"AUDIO INTERRUPTION: %@",
-            type ?: @"unknown"]
-    );
+    NSNumber *reason =
+        notification.userInfo[
+            AVAudioSessionInterruptionReasonKey
+        ];
 
     SRRecordLog(
         [NSString stringWithFormat:
-            @"STATE AFTER INTERRUPTION:\n%@",
-            SRSessionDiagnostic()]
+            @"AUDIO INTERRUPTION\n"
+             "TYPE: %@\n"
+             "REASON: %@",
+            type ?: @"unknown",
+            reason ?: @"unknown"]
     );
 
-    gInjectionEnabledForCurrentCall = NO;
-    gTestVoiceStartedForCurrentCall = NO;
-
-    SRScheduleAudioCheck(
-        @"AUDIO INTERRUPTION"
+    SRRecordSessionState(
+        @"AFTER INTERRUPTION"
     );
 }
-
-#pragma mark - Media Services
 
 static void SRHandleMediaServicesReset(
     NSNotification *notification
 )
 {
-    SRRecordLog(
-        @"MEDIA SERVICES RESET."
-    );
+    gHasAudioEvents = YES;
 
     SRRecordLog(
-        [NSString stringWithFormat:
-            @"STATE AFTER MEDIA RESET:\n%@",
-            SRSessionDiagnostic()]
-    );
-
-    gInjectionEnabledForCurrentCall = NO;
-    gTestVoiceStartedForCurrentCall = NO;
-
-    SRScheduleAudioCheck(
         @"MEDIA SERVICES RESET"
     );
-}
 
-#pragma mark - Application Active
+    SRRecordSessionState(
+        @"AFTER MEDIA SERVICES RESET"
+    );
+}
 
 static void SRHandleApplicationDidBecomeActive(
     NSNotification *notification
@@ -733,23 +424,29 @@ static void SRHandleApplicationDidBecomeActive(
         @"NOBANNY BECAME ACTIVE."
     );
 
-    SRRecordLog(
-        [NSString stringWithFormat:
-            @"CURRENT STATE:\n%@",
-            SRSessionDiagnostic()]
-    );
-
-    /*
-     * Do not immediately activate/configure anything.
-     * Just inspect the state.
-     */
-
-    SRScheduleAudioCheck(
+    SRRecordSessionState(
         @"NOBANNY BECAME ACTIVE"
     );
-}
 
-#pragma mark - Observers
+    if (gHasAudioEvents) {
+
+        dispatch_after(
+            dispatch_time(
+                DISPATCH_TIME_NOW,
+                1000 * NSEC_PER_MSEC
+            ),
+            dispatch_get_main_queue(),
+            ^{
+
+                SRRecordSessionState(
+                    @"FINAL STATE BEFORE REPORT"
+                );
+
+                SRShowReport();
+            }
+        );
+    }
+}
 
 static void SRStartObservers(void)
 {
@@ -825,96 +522,37 @@ static void SRStartObservers(void)
         }];
 
     SRRecordLog(
-        @"PASSIVE AUDIO OBSERVERS INSTALLED."
+        @"PASSIVE OBSERVERS INSTALLED."
     );
 }
 
-#pragma mark - Initial Startup
-
-static void SRStartup(void)
+static void SRInitialState(void)
 {
-    if (!@available(iOS 18.2, *)) {
-
-        SRPopup(
-            @"iOS 18.2 or newer is required."
-        );
-
-        return;
-    }
-
-    AVAudioApplication *application =
-        AVAudioApplication.sharedInstance;
-
-    AVAudioApplicationMicrophoneInjectionPermission permission =
-        application.microphoneInjectionPermission;
+    SRRecordSessionState(
+        @"INITIAL"
+    );
 
     SRRecordLog(
         [NSString stringWithFormat:
-            @"STARTUP PERMISSION: %@",
+            @"INJECTION PERMISSION: %@",
             SRPermissionString()]
     );
 
-    if (permission ==
-        AVAudioApplicationMicrophoneInjectionPermissionUndetermined) {
+    SRRecordLog(
+        @"NO INJECTION ACTION WILL BE PERFORMED."
+    );
 
-        SRRecordLog(
-            @"REQUESTING MICROPHONE INJECTION PERMISSION."
-        );
+    SRRecordLog(
+        @"NO AUDIO WILL BE GENERATED."
+    );
 
-        [AVAudioApplication
-            requestMicrophoneInjectionPermissionWithCompletionHandler:
-            ^(AVAudioApplicationMicrophoneInjectionPermission result) {
-
-                dispatch_async(
-                    dispatch_get_main_queue(),
-                    ^{
-
-                        SRRecordLog(
-                            [NSString stringWithFormat:
-                                @"PERMISSION CALLBACK: %@",
-                                SRPermissionString()]
-                        );
-
-                        if (result ==
-                            AVAudioApplicationMicrophoneInjectionPermissionGranted) {
-
-                            SRScheduleAudioCheck(
-                                @"PERMISSION GRANTED"
-                            );
-
-                        } else {
-
-                            SRPopup(
-                                [NSString stringWithFormat:
-                                    @"Microphone injection permission: %@",
-                                    SRPermissionString()]
-                            );
-                        }
-                    }
-                );
-            }];
-
-        return;
-    }
-
-    if (permission !=
-        AVAudioApplicationMicrophoneInjectionPermissionGranted) {
-
-        SRPopup(
-            [NSString stringWithFormat:
-                @"Injection permission is %@.",
-                SRPermissionString()]
-        );
-
-        return;
-    }
-
-    SRScheduleAudioCheck(
-        @"STARTUP"
+    SRPopup(
+        @"PASSIVE DIAGNOSTIC READY\n\n"
+         "SanneRealtime is only observing Discord's "
+         "audio session.\n\n"
+         "No injection and no test voice will be used."
     );
 }
-
-#pragma mark - Constructor
 
 __attribute__((constructor))
 static void SanneRealtimeLoaded(void)
@@ -927,19 +565,19 @@ static void SanneRealtimeLoaded(void)
     );
 
     SRRecordLog(
-        @"SANNE REALTIME - CALL STABILIZATION BUILD"
+        @"SANNE REALTIME - PASSIVE CALL TEST"
     );
 
     SRRecordLog(
-        @"NO AUDIO SESSION ACTIVATION"
+        @"ZERO AUDIO INJECTION"
     );
 
     SRRecordLog(
-        @"NO AUDIO ENGINE"
+        @"ZERO AUDIO GENERATION"
     );
 
     SRRecordLog(
-        @"NO MICROPHONE TAP"
+        @"ZERO AUDIO SESSION OWNERSHIP"
     );
 
     SRRecordLog(
@@ -960,7 +598,7 @@ static void SanneRealtimeLoaded(void)
                 dispatch_get_main_queue(),
                 ^{
 
-                    SRStartup();
+                    SRInitialState();
                 }
             );
         }
