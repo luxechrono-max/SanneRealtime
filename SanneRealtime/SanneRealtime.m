@@ -2,34 +2,17 @@
 #import <UIKit/UIKit.h>
 #import <AVFAudio/AVFAudio.h>
 
-static NSString *PermissionText(
-    AVAudioApplicationMicrophoneInjectionPermission permission
-) {
-    switch (permission) {
-        case AVAudioApplicationMicrophoneInjectionPermissionServiceDisabled:
-            return @"SERVICE DISABLED";
-
-        case AVAudioApplicationMicrophoneInjectionPermissionUndetermined:
-            return @"UNDETERMINED";
-
-        case AVAudioApplicationMicrophoneInjectionPermissionGranted:
-            return @"GRANTED";
-
-        case AVAudioApplicationMicrophoneInjectionPermissionDenied:
-            return @"DENIED";
-    }
-
-    return @"UNKNOWN";
-}
+static AVSpeechSynthesizer *synthesizer = nil;
 
 static void ShowResult(NSString *message) {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIWindow *window = nil;
 
         if (@available(iOS 13.0, *)) {
-            for (UIScene *scene
-                 in [UIApplication sharedApplication].connectedScenes) {
+            NSSet<UIScene *> *scenes =
+                [UIApplication sharedApplication].connectedScenes;
 
+            for (UIScene *scene in scenes) {
                 if (scene.activationState !=
                     UISceneActivationStateForegroundActive) {
                     continue;
@@ -89,72 +72,125 @@ static void ShowResult(NSString *message) {
     });
 }
 
-static void CheckPermission(void) {
+static void StartInjectionTest(void) {
 
     if (@available(iOS 18.2, *)) {
 
-        AVAudioApplication *app =
+        AVAudioApplication *application =
             [AVAudioApplication sharedInstance];
 
         AVAudioSession *session =
             [AVAudioSession sharedInstance];
 
-        AVAudioApplicationMicrophoneInjectionPermission before =
-            app.microphoneInjectionPermission;
+        AVAudioApplicationMicrophoneInjectionPermission permission =
+            application.microphoneInjectionPermission;
 
         BOOL available =
             session.isMicrophoneInjectionAvailable;
 
         NSLog(
-            @"[SanneRealtime] BEFORE: permission=%@ available=%@",
-            PermissionText(before),
+            @"[SanneRealtime] Permission=%ld Available=%@",
+            (long)permission,
             available ? @"YES" : @"NO"
         );
 
+        if (permission !=
+            AVAudioApplicationMicrophoneInjectionPermissionGranted) {
+
+            ShowResult(
+                @"Injection permission is not GRANTED."
+            );
+
+            return;
+        }
+
+        if (!available) {
+
+            ShowResult(
+                @"Injection is currently unavailable.\n\n"
+                 "Start a Discord voice call first."
+            );
+
+            return;
+        }
+
+        NSError *error = nil;
+
+        BOOL enabled =
+            [session
+                setPreferredMicrophoneInjectionMode:
+                    AVAudioSessionMicrophoneInjectionModeSpokenAudio
+                error:&error];
+
+        if (!enabled) {
+
+            NSString *errorText =
+                error.localizedDescription
+                ?: @"Unknown AVAudioSession error.";
+
+            ShowResult(
+                [NSString stringWithFormat:
+                    @"FAILED TO ENABLE INJECTION\n\n%@",
+                    errorText]
+            );
+
+            return;
+        }
+
+        NSLog(
+            @"[SanneRealtime] SpokenAudio injection enabled."
+        );
+
         /*
-         * Ask iOS directly.
-         *
-         * If permission was already decided, Apple says this
-         * completion handler returns the stored result immediately.
-         * If it was still undetermined, iOS presents the dialog.
+         * Keep the synthesizer alive while it speaks.
          */
-        [AVAudioApplication
-            requestMicrophoneInjectionPermissionWithCompletionHandler:
-            ^(AVAudioApplicationMicrophoneInjectionPermission result) {
+        synthesizer =
+            [[AVSpeechSynthesizer alloc] init];
 
-                AVAudioApplication *updatedApp =
-                    [AVAudioApplication sharedInstance];
+        AVSpeechUtterance *utterance =
+            [[AVSpeechUtterance alloc]
+                initWithString:
+                    @"SanneRealtime test. "
+                     "This audio is being injected into the call."];
 
-                AVAudioSession *updatedSession =
-                    [AVAudioSession sharedInstance];
+        utterance.rate = 0.48;
+        utterance.volume = 1.0;
 
-                AVAudioApplicationMicrophoneInjectionPermission after =
-                    updatedApp.microphoneInjectionPermission;
+        AVSpeechSynthesisVoice *voice =
+            [AVSpeechSynthesisVoice
+                voiceWithLanguage:@"en-US"];
 
-                BOOL availableAfter =
-                    updatedSession.isMicrophoneInjectionAvailable;
+        if (voice) {
+            utterance.voice = voice;
+        }
 
-                NSString *message =
-                    [NSString stringWithFormat:
-                        @"REQUEST RESULT: %@\n\n"
-                         "STORED PERMISSION: %@\n\n"
-                         "INJECTION AVAILABLE: %@",
-                        PermissionText(result),
-                        PermissionText(after),
-                        availableAfter ? @"YES" : @"NO"];
+        ShowResult(
+            @"INJECTION ENABLED\n\n"
+             "Sending test speech now."
+        );
 
+        /*
+         * Give the alert a moment to appear, then speak.
+         */
+        dispatch_after(
+            dispatch_time(
+                DISPATCH_TIME_NOW,
+                2 * NSEC_PER_SEC
+            ),
+            dispatch_get_main_queue(),
+            ^{
                 NSLog(
-                    @"[SanneRealtime] %@",
-                    message
+                    @"[SanneRealtime] Speaking test sentence."
                 );
 
-                ShowResult(message);
+                [synthesizer speakUtterance:utterance];
             }
-        ];
-    }
-    else {
+        );
+
+    } else {
+
         ShowResult(
-            @"This test requires iOS 18.2 or newer."
+            @"Microphone injection requires iOS 18.2 or newer."
         );
     }
 }
@@ -176,7 +212,7 @@ static void SanneRealtimeLoaded(void) {
             ),
             dispatch_get_main_queue(),
             ^{
-                CheckPermission();
+                StartInjectionTest();
             }
         );
     });
