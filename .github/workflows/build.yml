@@ -23,9 +23,15 @@ jobs:
             -mios-version-min=18.2 \
             -framework AVFAudio \
             -framework Foundation \
+            -framework UIKit \
             -fobjc-arc \
             SanneRealtime/SanneRealtime.m \
             -o SanneRealtime.dylib
+
+      - name: Verify dylib
+        run: |
+          file SanneRealtime.dylib
+          otool -hv SanneRealtime.dylib
 
       - name: Upload dylib
         uses: actions/upload-artifact@v4
