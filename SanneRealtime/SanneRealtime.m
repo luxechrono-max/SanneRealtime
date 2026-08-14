@@ -2,19 +2,17 @@
 #import <UIKit/UIKit.h>
 #import <AVFAudio/AVFAudio.h>
 
+static AVSpeechSynthesizer *gSynth = nil;
+
 static void SRPopup(NSString *message)
 {
     dispatch_async(dispatch_get_main_queue(), ^{
-
         UIWindow *window = nil;
 
         if (@available(iOS 13.0, *)) {
+            for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
 
-            for (UIScene *scene in
-                 UIApplication.sharedApplication.connectedScenes) {
-
-                if (scene.activationState !=
-                    UISceneActivationStateForegroundActive)
+                if (scene.activationState != UISceneActivationStateForegroundActive)
                     continue;
 
                 if (![scene isKindOfClass:[UIWindowScene class]])
@@ -23,7 +21,6 @@ static void SRPopup(NSString *message)
                 UIWindowScene *ws = (UIWindowScene *)scene;
 
                 for (UIWindow *w in ws.windows) {
-
                     if (w.isKeyWindow) {
                         window = w;
                         break;
@@ -44,20 +41,16 @@ static void SRPopup(NSString *message)
             vc = vc.presentedViewController;
 
         UIAlertController *alert =
-        [UIAlertController
-         alertControllerWithTitle:@"SanneRealtime"
-         message:message
-         preferredStyle:UIAlertControllerStyleAlert];
+        [UIAlertController alertControllerWithTitle:@"SanneRealtime"
+                                            message:message
+                                     preferredStyle:UIAlertControllerStyleAlert];
 
         [alert addAction:
-         [UIAlertAction
-          actionWithTitle:@"OK"
-          style:UIAlertActionStyleDefault
-          handler:nil]];
+            [UIAlertAction actionWithTitle:@"OK"
+                                     style:UIAlertActionStyleDefault
+                                   handler:nil]];
 
-        [vc presentViewController:alert
-                          animated:YES
-                        completion:nil];
+        [vc presentViewController:alert animated:YES completion:nil];
     });
 }
 
@@ -89,49 +82,53 @@ static NSString *SRPermissionString(void)
 }
 
 
-static NSString *SRRouteDescription(AVAudioSessionRouteDescription *route)
+static AVSpeechSynthesisVoice *SRFemaleVoice(void)
 {
-    NSMutableString *result =
-        [NSMutableString string];
+    if (@available(iOS 13.0, *)) {
 
-    [result appendFormat:
-        @"INPUTS: %lu\n",
-        (unsigned long)route.inputs.count];
+        NSArray<AVSpeechSynthesisVoice *> *voices =
+            [AVSpeechSynthesisVoice speechVoices];
 
-    for (AVAudioSessionPortDescription *port in route.inputs) {
+        for (AVSpeechSynthesisVoice *voice in voices) {
 
-        [result appendFormat:
-            @"  INPUT: %@ | %@ | channels=%lu\n",
-            port.portType ?: @"?",
-            port.portName ?: @"?",
-            (unsigned long)port.channels.count];
+            if (voice.gender == AVSpeechSynthesisVoiceGenderFemale &&
+                [voice.language hasPrefix:@"en"]) {
+
+                return voice;
+            }
+        }
     }
 
-    [result appendFormat:
-        @"OUTPUTS: %lu\n",
-        (unsigned long)route.outputs.count];
-
-    for (AVAudioSessionPortDescription *port in route.outputs) {
-
-        [result appendFormat:
-            @"  OUTPUT: %@ | %@ | channels=%lu\n",
-            port.portType ?: @"?",
-            port.portName ?: @"?",
-            (unsigned long)port.channels.count];
-    }
-
-    return result;
+    return [AVSpeechSynthesisVoice voiceWithLanguage:@"en-US"];
 }
 
 
-static void SRInspectAudio(void)
+static void SRSpeakTest(void)
+{
+    if (!gSynth)
+        gSynth = [[AVSpeechSynthesizer alloc] init];
+
+    AVSpeechSynthesisVoice *voice = SRFemaleVoice();
+
+    AVSpeechUtterance *utterance =
+        [AVSpeechUtterance speechUtteranceWithString:
+            @"Hello. This is the SanneRealtime female voice test."];
+
+    utterance.voice = voice;
+    utterance.rate = 0.48;
+    utterance.pitchMultiplier = 1.05;
+    utterance.volume = 1.0;
+
+    [gSynth speakUtterance:utterance];
+}
+
+
+static void SREnableInjectionAndTest(void)
 {
     if (!@available(iOS 18.2, *)) {
-
-        SRPopup(@"iOS 18.2+ required.");
+        SRPopup(@"iOS 18.2 or newer is required.");
         return;
     }
-
 
     AVAudioApplication *application =
         AVAudioApplication.sharedInstance;
@@ -139,262 +136,164 @@ static void SRInspectAudio(void)
     AVAudioSession *session =
         AVAudioSession.sharedInstance;
 
+    AVAudioApplicationMicrophoneInjectionPermission permission =
+        application.microphoneInjectionPermission;
 
-    BOOL injectionAvailable =
-        session.isMicrophoneInjectionAvailable;
+    if (permission ==
+        AVAudioApplicationMicrophoneInjectionPermissionUndetermined) {
 
+        [AVAudioApplication
+            requestMicrophoneInjectionPermissionWithCompletionHandler:
+            ^(AVAudioApplicationMicrophoneInjectionPermission result) {
 
-    NSString *permission =
-        SRPermissionString();
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (result ==
+                        AVAudioApplicationMicrophoneInjectionPermissionGranted) {
 
+                        SREnableInjectionAndTest();
 
-    NSString *category =
-        session.category ?: @"?";
+                    } else {
 
+                        SRPopup(
+                            [NSString stringWithFormat:
+                                @"Microphone injection permission: %@",
+                                SRPermissionString()]
+                        );
+                    }
+                });
+            }];
 
-    NSString *mode =
-        session.mode ?: @"?";
-
-
-    double sampleRate =
-        session.sampleRate;
-
-
-    double IOBuffer =
-        session.IOBufferDuration;
-
-
-    NSInteger inputChannels =
-        session.inputNumberOfChannels;
-
-
-    BOOL inputAvailable =
-        session.isInputAvailable;
-
-
-    AVAudioSessionRouteDescription *route =
-        session.currentRoute;
-
-
-    NSString *routeInfo =
-        SRRouteDescription(route);
-
-
-    NSString *preferredInput =
-        session.preferredInput
-        ? [NSString stringWithFormat:
-           @"%@ | %@",
-           session.preferredInput.portType ?: @"?",
-           session.preferredInput.portName ?: @"?"]
-        : @"NONE";
-
-
-    BOOL otherAudio =
-        session.isOtherAudioPlaying;
-
-
-    BOOL recordPermission =
-        (application.recordPermission ==
-         AVAudioApplicationRecordPermissionGranted);
-
-
-    NSString *message =
-    [NSString stringWithFormat:
-
-     @"INJECTION PERMISSION: %@\n"
-     @"INJECTION AVAILABLE: %@\n\n"
-
-     @"RECORD PERMISSION: %@\n"
-     @"INPUT AVAILABLE: %@\n"
-     @"INPUT CHANNELS: %ld\n\n"
-
-     @"CATEGORY: %@\n"
-     @"MODE: %@\n"
-     @"SAMPLE RATE: %.1f Hz\n"
-     @"IO BUFFER: %.4f sec\n\n"
-
-     @"PREFERRED INPUT: %@\n"
-     @"OTHER AUDIO PLAYING: %@\n\n"
-
-     @"CURRENT ROUTE\n%@",
-
-     permission,
-
-     injectionAvailable
-        ? @"YES"
-        : @"NO",
-
-     recordPermission
-        ? @"GRANTED"
-        : @"NOT GRANTED",
-
-     inputAvailable
-        ? @"YES"
-        : @"NO",
-
-     (long)inputChannels,
-
-     category,
-
-     mode,
-
-     sampleRate,
-
-     IOBuffer,
-
-     preferredInput,
-
-     otherAudio
-        ? @"YES"
-        : @"NO",
-
-     routeInfo];
-
-
-    NSLog(
-        @"[SanneRealtime]\n%@",
-        message
-    );
-
-
-    SRPopup(message);
-}
-
-
-static void SRSetInjectionMode(void)
-{
-    if (!@available(iOS 18.2, *))
         return;
+    }
 
-
-    AVAudioSession *session =
-        AVAudioSession.sharedInstance;
-
-
-    if (!session.isMicrophoneInjectionAvailable) {
+    if (permission !=
+        AVAudioApplicationMicrophoneInjectionPermissionGranted) {
 
         SRPopup(
-            @"Injection is currently NOT AVAILABLE.\n\n"
-             "Start the Discord call and try again."
+            [NSString stringWithFormat:
+                @"Injection permission is %@.",
+                SRPermissionString()]
         );
 
         return;
     }
 
+    if (!session.isMicrophoneInjectionAvailable) {
+
+        SRPopup(
+            @"Permission is GRANTED, but injection is currently unavailable.\n\n"
+             "Start the Discord call and open Nobanny again."
+        );
+
+        return;
+    }
 
     NSError *error = nil;
 
-
     BOOL success =
         [session
-         setPreferredMicrophoneInjectionMode:
-            AVAudioSessionMicrophoneInjectionModeSpokenAudio
-         error:&error];
-
+            setPreferredMicrophoneInjectionMode:
+                AVAudioSessionMicrophoneInjectionModeSpokenAudio
+            error:&error];
 
     if (!success) {
 
         SRPopup(
             [NSString stringWithFormat:
-                @"SPOKEN AUDIO FAILED\n\n%@",
-                error.localizedDescription
-                ?: @"Unknown error"]
+                @"Could not enable SpokenAudio injection.\n\n%@",
+                error.localizedDescription ?: @"Unknown error"]
         );
 
         return;
     }
 
-
     SRPopup(
-        @"SPOKEN AUDIO MODE SET.\n\n"
-         "No microphone engine was started.\n"
-         "No audio session was taken over."
+        @"INJECTION: READY\n\n"
+         "Female test voice will play now."
     );
-}
-
-
-static void SRRun(void)
-{
-    if (!@available(iOS 18.2, *)) {
-
-        SRPopup(@"iOS 18.2+ required.");
-        return;
-    }
-
 
     /*
      * IMPORTANT:
      *
-     * We intentionally do NOT:
+     * We deliberately do NOT:
      *
+     * - activate the audio session
+     * - change Discord's category
      * - create AVAudioEngine
-     * - access inputNode
-     * - install a tap
-     * - change category
-     * - change mode
-     * - activate the session
-     * - deactivate the session
+     * - install a microphone tap
+     * - take ownership of the audio route
      *
-     * We only inspect the existing session.
+     * Apple's microphone-injection system handles adding
+     * the synthesized speech to the active call.
      */
 
-
-    SRInspectAudio();
-
-
     dispatch_after(
-        dispatch_time(
-            DISPATCH_TIME_NOW,
-            800 * NSEC_PER_MSEC
-        ),
+        dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC),
         dispatch_get_main_queue(),
         ^{
-
-            SRSetInjectionMode();
+            SRSpeakTest();
         }
     );
+}
+
+
+static void SRCheckInjectionState(void)
+{
+    if (!@available(iOS 18.2, *)) {
+        SRPopup(@"iOS 18.2 or newer is required.");
+        return;
+    }
+
+    AVAudioSession *session =
+        AVAudioSession.sharedInstance;
+
+    NSString *message =
+    [NSString stringWithFormat:
+        @"INJECTION PERMISSION: %@\n"
+         "INJECTION AVAILABLE: %@\n\n"
+         "CATEGORY: %@\n"
+         "MODE: %@\n"
+         "INPUT AVAILABLE: %@\n"
+         "INPUT CHANNELS: %ld",
+
+        SRPermissionString(),
+
+        session.isMicrophoneInjectionAvailable
+            ? @"YES"
+            : @"NO",
+
+        session.category ?: @"?",
+
+        session.mode ?: @"?",
+
+        session.isInputAvailable
+            ? @"YES"
+            : @"NO",
+
+        (long)session.inputNumberOfChannels
+    ];
+
+    NSLog(@"[SanneRealtime]\n%@", message);
+
+    SREnableInjectionAndTest();
 }
 
 
 __attribute__((constructor))
 static void SanneRealtimeLoaded(void)
 {
-    NSLog(
-        @"[SanneRealtime] ========================="
-    );
+    NSLog(@"[SanneRealtime] ===========================");
+    NSLog(@"[SanneRealtime] FEMALE TEST VOICE BUILD");
+    NSLog(@"[SanneRealtime] ===========================");
 
-    NSLog(
-        @"[SanneRealtime] AUDIO ROUTE DIAGNOSTIC BUILD"
-    );
+    dispatch_async(dispatch_get_main_queue(), ^{
 
-    NSLog(
-        @"[SanneRealtime] NO AVAudioEngine"
-    );
-
-    NSLog(
-        @"[SanneRealtime] NO MICROPHONE CAPTURE"
-    );
-
-    NSLog(
-        @"[SanneRealtime] ========================="
-    );
-
-
-    dispatch_async(
-        dispatch_get_main_queue(),
-        ^{
-
-            dispatch_after(
-                dispatch_time(
-                    DISPATCH_TIME_NOW,
-                    1500 * NSEC_PER_MSEC
-                ),
-                dispatch_get_main_queue(),
-                ^{
-
-                    SRRun();
-                }
-            );
-        }
-    );
+        dispatch_after(
+            dispatch_time(DISPATCH_TIME_NOW, 1200 * NSEC_PER_MSEC),
+            dispatch_get_main_queue(),
+            ^{
+                SRCheckInjectionState();
+            }
+        );
+    });
 }
