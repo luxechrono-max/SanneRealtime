@@ -4,29 +4,25 @@
 
 static AVSpeechSynthesizer *gSynth = nil;
 
-#pragma mark - Popup
-
 static void SRPopup(NSString *message)
 {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIWindow *window = nil;
 
         if (@available(iOS 13.0, *)) {
-            for (UIScene *scene in
-                 UIApplication.sharedApplication.connectedScenes) {
+            for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
 
-                if (scene.activationState !=
-                    UISceneActivationStateForegroundActive)
+                if (scene.activationState != UISceneActivationStateForegroundActive)
                     continue;
 
                 if (![scene isKindOfClass:[UIWindowScene class]])
                     continue;
 
-                UIWindowScene *ws = (UIWindowScene *)scene;
+                UIWindowScene *windowScene = (UIWindowScene *)scene;
 
-                for (UIWindow *w in ws.windows) {
-                    if (w.isKeyWindow) {
-                        window = w;
+                for (UIWindow *candidate in windowScene.windows) {
+                    if (candidate.isKeyWindow) {
+                        window = candidate;
                         break;
                     }
                 }
@@ -39,10 +35,10 @@ static void SRPopup(NSString *message)
         if (!window)
             return;
 
-        UIViewController *vc = window.rootViewController;
+        UIViewController *controller = window.rootViewController;
 
-        while (vc.presentedViewController)
-            vc = vc.presentedViewController;
+        while (controller.presentedViewController)
+            controller = controller.presentedViewController;
 
         UIAlertController *alert =
             [UIAlertController
@@ -56,23 +52,20 @@ static void SRPopup(NSString *message)
                 style:UIAlertActionStyleDefault
                 handler:nil]];
 
-        [vc presentViewController:alert
-                         animated:YES
-                       completion:nil];
+        [controller presentViewController:alert
+                                 animated:YES
+                               completion:nil];
     });
 }
-
-#pragma mark - Permission
 
 static NSString *SRPermissionString(void)
 {
     if (@available(iOS 18.2, *)) {
 
-        AVAudioApplicationMicrophoneInjectionPermission p =
-            AVAudioApplication.sharedInstance
-                .microphoneInjectionPermission;
+        AVAudioApplicationMicrophoneInjectionPermission permission =
+            AVAudioApplication.sharedInstance.microphoneInjectionPermission;
 
-        switch (p) {
+        switch (permission) {
 
             case AVAudioApplicationMicrophoneInjectionPermissionGranted:
                 return @"GRANTED";
@@ -90,8 +83,6 @@ static NSString *SRPermissionString(void)
 
     return @"UNAVAILABLE";
 }
-
-#pragma mark - Route Diagnostics
 
 static NSString *SRPortDescription(
     AVAudioSessionPortDescription *port
@@ -113,8 +104,7 @@ static NSString *SRRouteDescription(
     if (!route)
         return @"<no route>";
 
-    NSMutableString *result =
-        [NSMutableString string];
+    NSMutableString *result = [NSMutableString string];
 
     [result appendString:@"INPUTS:\n"];
 
@@ -124,8 +114,7 @@ static NSString *SRRouteDescription(
 
     } else {
 
-        for (AVAudioSessionPortDescription *port
-             in route.inputs) {
+        for (AVAudioSessionPortDescription *port in route.inputs) {
 
             [result appendFormat:
                 @"  %@\n",
@@ -141,8 +130,7 @@ static NSString *SRRouteDescription(
 
     } else {
 
-        for (AVAudioSessionPortDescription *port
-             in route.outputs) {
+        for (AVAudioSessionPortDescription *port in route.outputs) {
 
             [result appendFormat:
                 @"  %@\n",
@@ -152,8 +140,6 @@ static NSString *SRRouteDescription(
 
     return result;
 }
-
-#pragma mark - Session Diagnostic
 
 static NSString *SRSessionDiagnostic(void)
 {
@@ -166,64 +152,25 @@ static NSString *SRSessionDiagnostic(void)
     AVAudioSessionRouteDescription *route =
         session.currentRoute;
 
-    AVAudioFormat *inputFormat = nil;
-
-    @try {
-
-        inputFormat =
-            [session inputFormatForBus:0];
-
-    }
-    @catch (NSException *exception) {
-
-        NSLog(
-            @"[SanneRealtime] inputFormat exception: %@",
-            exception
-        );
-    }
-
-    NSString *formatDescription =
-        @"<unavailable>";
-
-    if (inputFormat) {
-
-        formatDescription =
-            [NSString stringWithFormat:
-                @"%.2f Hz / %u ch",
-                inputFormat.sampleRate,
-                inputFormat.channelCount];
-    }
-
     return [NSString stringWithFormat:
-
         @"CATEGORY: %@\n"
          "MODE: %@\n"
          "INPUT AVAILABLE: %@\n"
          "INPUT CHANNELS: %ld\n"
          "SAMPLE RATE: %.2f\n"
-         "INPUT FORMAT: %@\n"
+         "INPUT LATENCY: %.6f\n"
+         "OUTPUT LATENCY: %.6f\n"
          "INJECTION AVAILABLE: %@\n\n"
          "%@",
-
         session.category ?: @"?",
         session.mode ?: @"?",
-
-        session.isInputAvailable
-            ? @"YES"
-            : @"NO",
-
+        session.isInputAvailable ? @"YES" : @"NO",
         (long)session.inputNumberOfChannels,
-
         session.sampleRate,
-
-        formatDescription,
-
-        session.isMicrophoneInjectionAvailable
-            ? @"YES"
-            : @"NO",
-
-        SRRouteDescription(route)
-    ];
+        session.inputLatency,
+        session.outputLatency,
+        session.isMicrophoneInjectionAvailable ? @"YES" : @"NO",
+        SRRouteDescription(route)];
 }
 
 static void SRLogSessionState(NSString *reason)
@@ -243,8 +190,6 @@ static void SRLogSessionState(NSString *reason)
         diagnostic
     );
 }
-
-#pragma mark - Known-Good Injection Test
 
 static AVSpeechSynthesisVoice *SRFemaleVoice(void)
 {
@@ -271,17 +216,14 @@ static AVSpeechSynthesisVoice *SRFemaleVoice(void)
 static void SRSpeakTest(void)
 {
     if (!gSynth)
-        gSynth =
-            [[AVSpeechSynthesizer alloc] init];
+        gSynth = [[AVSpeechSynthesizer alloc] init];
 
     AVSpeechUtterance *utterance =
         [AVSpeechUtterance
             speechUtteranceWithString:
                 @"Hello. This is the SanneRealtime female voice test."];
 
-    utterance.voice =
-        SRFemaleVoice();
-
+    utterance.voice = SRFemaleVoice();
     utterance.rate = 0.48;
     utterance.pitchMultiplier = 1.05;
     utterance.volume = 1.0;
@@ -398,17 +340,6 @@ static void SREnableInjectionAndTest(void)
          "Female test voice will play now."
     );
 
-    /*
-     * DO NOT:
-     *
-     * - activate the session
-     * - change the category
-     * - change the mode
-     * - create AVAudioEngine
-     * - install a microphone tap
-     * - take ownership of Discord's route
-     */
-
     dispatch_after(
         dispatch_time(
             DISPATCH_TIME_NOW,
@@ -421,11 +352,7 @@ static void SREnableInjectionAndTest(void)
     );
 }
 
-#pragma mark - Passive Notifications
-
-static void SRHandleRouteChange(
-    NSNotification *notification
-)
+static void SRHandleRouteChange(NSNotification *notification)
 {
     NSLog(
         @"[SanneRealtime] ROUTE CHANGE"
@@ -441,14 +368,10 @@ static void SRHandleRouteChange(
         reason ?: @"unknown"
     );
 
-    SRLogSessionState(
-        @"ROUTE CHANGE"
-    );
+    SRLogSessionState(@"ROUTE CHANGE");
 }
 
-static void SRHandleCapabilityChange(
-    NSNotification *notification
-)
+static void SRHandleCapabilityChange(NSNotification *notification)
 {
     NSLog(
         @"[SanneRealtime] INJECTION CAPABILITY CHANGE"
@@ -459,9 +382,7 @@ static void SRHandleCapabilityChange(
     );
 }
 
-static void SRHandleInterruption(
-    NSNotification *notification
-)
+static void SRHandleInterruption(NSNotification *notification)
 {
     NSNumber *type =
         notification.userInfo[
@@ -473,25 +394,17 @@ static void SRHandleInterruption(
         type ?: @"unknown"
     );
 
-    SRLogSessionState(
-        @"AUDIO INTERRUPTION"
-    );
+    SRLogSessionState(@"AUDIO INTERRUPTION");
 }
 
-static void SRHandleMediaServicesReset(
-    NSNotification *notification
-)
+static void SRHandleMediaServicesReset(NSNotification *notification)
 {
     NSLog(
         @"[SanneRealtime] MEDIA SERVICES RESET"
     );
 
-    SRLogSessionState(
-        @"MEDIA SERVICES RESET"
-    );
+    SRLogSessionState(@"MEDIA SERVICES RESET");
 }
-
-#pragma mark - Observers
 
 static void SRStartPassiveObservers(void)
 {
@@ -515,12 +428,10 @@ static void SRStartPassiveObservers(void)
                     object:nil
                     queue:NSOperationQueue.mainQueue
                     usingBlock:
-            ^(NSNotification *notification) {
+        ^(NSNotification *notification) {
 
-                SRHandleCapabilityChange(
-                    notification
-                );
-            }];
+            SRHandleCapabilityChange(notification);
+        }];
     }
 
     [center addObserverForName:
@@ -540,9 +451,7 @@ static void SRStartPassiveObservers(void)
                 usingBlock:
         ^(NSNotification *notification) {
 
-            SRHandleMediaServicesReset(
-                notification
-            );
+            SRHandleMediaServicesReset(notification);
         }];
 
     NSLog(
@@ -550,26 +459,16 @@ static void SRStartPassiveObservers(void)
     );
 }
 
-#pragma mark - Initial Diagnostic
-
 static void SRInitialDiagnostic(void)
 {
     NSLog(
         @"[SanneRealtime] Initial diagnostic."
     );
 
-    SRLogSessionState(
-        @"INITIAL"
-    );
+    SRLogSessionState(@"INITIAL");
 
-    /*
-     * Preserve the proven injection path
-     * as our control test.
-     */
     SREnableInjectionAndTest();
 }
-
-#pragma mark - Constructor
 
 __attribute__((constructor))
 static void SanneRealtimeLoaded(void)
@@ -592,9 +491,6 @@ static void SanneRealtimeLoaded(void)
 
             SRStartPassiveObservers();
 
-            /*
-             * Give Nobanny/Discord time to initialize.
-             */
             dispatch_after(
                 dispatch_time(
                     DISPATCH_TIME_NOW,
