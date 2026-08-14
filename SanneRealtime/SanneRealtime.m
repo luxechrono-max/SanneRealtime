@@ -27,7 +27,7 @@
 
     [session setCategory:AVAudioSessionCategoryPlayAndRecord
                     mode:AVAudioSessionModeVoiceChat
-                 options:AVAudioSessionCategoryOptionAllowBluetooth
+                 options:AVAudioSessionCategoryOptionAllowBluetoothHFP
                    error:&error];
 
     if (error) {
@@ -45,7 +45,7 @@
     if (@available(iOS 18.2, *)) {
 
         AVAudioApplication *application =
-            [AVAudioApplication sharedApplication];
+            [AVAudioApplication sharedInstance];
 
         NSLog(
             @"[SanneRealtime] Injection permission: %ld",
