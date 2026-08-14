@@ -1,0 +1,46 @@
+name: Build SanneRealtime
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build iOS dylib
+        run: |
+          xcrun clang \
+            -dynamiclib \
+            -arch arm64 \
+            -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" \
+            -mios-version-min=18.2 \
+            -framework AVFAudio \
+            -framework Foundation \
+            -install_name "@rpath/SanneRealtime.dylib" \
+            -fobjc-arc \
+            SanneRealtime/SanneRealtime.m \
+            -o SanneRealtime.dylib
+
+      - name: Package
+        run: |
+          mkdir -p package/Payload
+
+          cp SanneRealtime.dylib package/
+
+          cp SanneRealtime/Info.plist package/
+
+          cd package
+          zip -r ../SanneRealtime.zip .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SanneRealtime
+          path: SanneRealtime.zip
