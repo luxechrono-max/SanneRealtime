@@ -18,7 +18,10 @@
 }
 
 - (void)start {
-    AVAudioSession *session = [AVAudioSession sharedInstance];
+    NSLog(@"[SanneRealtime] Starting...");
+
+    AVAudioSession *session =
+        [AVAudioSession sharedInstance];
 
     NSError *error = nil;
 
@@ -28,25 +31,82 @@
                    error:&error];
 
     if (error) {
-        NSLog(@"[SanneRealtime] setCategory error: %@", error);
+        NSLog(@"[SanneRealtime] Category error: %@", error);
         return;
     }
 
     [session setActive:YES error:&error];
 
     if (error) {
-        NSLog(@"[SanneRealtime] setActive error: %@", error);
+        NSLog(@"[SanneRealtime] Activation error: %@", error);
         return;
     }
 
     if (@available(iOS 18.2, *)) {
-        NSLog(
-            @"[SanneRealtime] Microphone injection available: %@",
-            session.isMicrophoneInjectionAvailable ? @"YES" : @"NO"
-        );
-    }
 
-    NSLog(@"[SanneRealtime] Audio session initialized");
+        AVAudioApplication *application =
+            [AVAudioApplication sharedApplication];
+
+        NSLog(
+            @"[SanneRealtime] Injection permission: %ld",
+            (long)application.microphoneInjectionPermission
+        );
+
+        [AVAudioApplication
+            requestMicrophoneInjectionPermissionWithCompletionHandler:
+            ^(AVAudioApplicationMicrophoneInjectionPermission permission) {
+
+                NSLog(
+                    @"[SanneRealtime] Injection permission result: %ld",
+                    (long)permission
+                );
+
+                if (
+                    permission ==
+                    AVAudioApplicationMicrophoneInjectionPermissionGranted
+                ) {
+
+                    dispatch_async(
+                        dispatch_get_main_queue(),
+                        ^{
+
+                            NSError *injectionError = nil;
+
+                            BOOL available =
+                                session.isMicrophoneInjectionAvailable;
+
+                            NSLog(
+                                @"[SanneRealtime] Injection available: %@",
+                                available ? @"YES" : @"NO"
+                            );
+
+                            if (!available) {
+                                return;
+                            }
+
+                            BOOL success =
+                                [session
+                                    setPreferredMicrophoneInjectionMode:
+                                        AVAudioSessionMicrophoneInjectionModeSpokenAudio
+                                    error:&injectionError];
+
+                            NSLog(
+                                @"[SanneRealtime] Injection enabled: %@",
+                                success ? @"YES" : @"NO"
+                            );
+
+                            if (injectionError) {
+                                NSLog(
+                                    @"[SanneRealtime] Injection error: %@",
+                                    injectionError
+                                );
+                            }
+                        }
+                    );
+                }
+            }
+        ];
+    }
 }
 
 @end
