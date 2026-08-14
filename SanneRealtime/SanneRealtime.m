@@ -2,42 +2,13 @@
 #import <UIKit/UIKit.h>
 #import <AVFAudio/AVFAudio.h>
 
-static id capabilityObserver = nil;
-static BOOL popupVisible = NO;
+static BOOL testRunning = NO;
 
-static NSString *PermissionName(
-    AVAudioApplicationMicrophoneInjectionPermission permission
-) {
-    if (permission ==
-        AVAudioApplicationMicrophoneInjectionPermissionGranted) {
-        return @"GRANTED";
-    }
-
-    if (permission ==
-        AVAudioApplicationMicrophoneInjectionPermissionDenied) {
-        return @"DENIED";
-    }
-
-    if (permission ==
-        AVAudioApplicationMicrophoneInjectionPermissionUndetermined) {
-        return @"UNDETERMINED";
-    }
-
-    return @"SERVICE DISABLED";
-}
-
-
-static void ShowPopup(NSString *message) {
-
+static void Popup(NSString *message) {
     dispatch_async(dispatch_get_main_queue(), ^{
-
-        if (popupVisible)
-            return;
-
         UIWindow *window = nil;
 
         if (@available(iOS 13.0, *)) {
-
             for (UIScene *scene in
                  [UIApplication sharedApplication].connectedScenes) {
 
@@ -48,11 +19,9 @@ static void ShowPopup(NSString *message) {
                 if (![scene isKindOfClass:[UIWindowScene class]])
                     continue;
 
-                UIWindowScene *windowScene =
-                    (UIWindowScene *)scene;
+                UIWindowScene *ws = (UIWindowScene *)scene;
 
-                for (UIWindow *candidate in windowScene.windows) {
-
+                for (UIWindow *candidate in ws.windows) {
                     if (candidate.isKeyWindow) {
                         window = candidate;
                         break;
@@ -67,13 +36,10 @@ static void ShowPopup(NSString *message) {
         if (!window)
             return;
 
-        UIViewController *vc =
-            window.rootViewController;
+        UIViewController *vc = window.rootViewController;
 
         while (vc.presentedViewController)
             vc = vc.presentedViewController;
-
-        popupVisible = YES;
 
         UIAlertController *alert =
             [UIAlertController
@@ -85,9 +51,7 @@ static void ShowPopup(NSString *message) {
             [UIAlertAction
                 actionWithTitle:@"OK"
                 style:UIAlertActionStyleDefault
-                handler:^(UIAlertAction *action) {
-                    popupVisible = NO;
-                }]];
+                handler:nil]];
 
         [vc presentViewController:alert
                           animated:YES
@@ -96,7 +60,63 @@ static void ShowPopup(NSString *message) {
 }
 
 
-static void CheckState(NSString *reason) {
+static void EnableInjection(void) {
+
+    if (!@available(iOS 18.2, *)) {
+        Popup(@"iOS 18.2+ required.");
+        return;
+    }
+
+    AVAudioSession *session =
+        [AVAudioSession sharedInstance];
+
+    if (!session.isMicrophoneInjectionAvailable) {
+
+        Popup(
+            @"PERMISSION: GRANTED\n\n"
+             "INJECTION AVAILABLE: NO\n\n"
+             "Keep the Discord call connected and "
+             "restart Nobanny when the call is established."
+        );
+
+        return;
+    }
+
+
+    NSError *error = nil;
+
+    BOOL success =
+        [session
+            setPreferredMicrophoneInjectionMode:
+                AVAudioSessionMicrophoneInjectionModeSpokenAudio
+            error:&error];
+
+    if (!success) {
+
+        Popup(
+            [NSString stringWithFormat:
+                @"Injection mode failed.\n\n%@",
+                error.localizedDescription
+                    ?: @"Unknown error"]
+        );
+
+        return;
+    }
+
+
+    testRunning = YES;
+
+    Popup(
+        @"PERMISSION: GRANTED\n\n"
+         "INJECTION AVAILABLE: YES\n\n"
+         "SPOKEN AUDIO: ENABLED\n\n"
+         "INJECTION PATH READY.\n\n"
+         "No audio engine is running."
+    );
+}
+
+
+static void CheckAndEnable(void) {
 
     if (!@available(iOS 18.2, *))
         return;
@@ -107,108 +127,40 @@ static void CheckState(NSString *reason) {
     AVAudioApplicationMicrophoneInjectionPermission permission =
         application.microphoneInjectionPermission;
 
-    AVAudioSession *session =
-        [AVAudioSession sharedInstance];
 
-    BOOL available =
-        session.isMicrophoneInjectionAvailable;
+    if (permission !=
+        AVAudioApplicationMicrophoneInjectionPermissionGranted) {
 
-    NSLog(
-        @"[SanneRealtime] %@ | permission=%@ | available=%@",
-        reason,
-        PermissionName(permission),
-        available ? @"YES" : @"NO"
-    );
+        [AVAudioApplication
+            requestMicrophoneInjectionPermissionWithCompletionHandler:
+            ^(AVAudioApplicationMicrophoneInjectionPermission result) {
 
+                dispatch_async(
+                    dispatch_get_main_queue(),
+                    ^{
 
-    NSString *message =
-        [NSString stringWithFormat:
-            @"PERMISSION: %@\n\n"
-             "INJECTION AVAILABLE: %@\n\n"
-             "Reason: %@",
-            PermissionName(permission),
-            available ? @"YES" : @"NO",
-            reason];
+                        if (result ==
+                            AVAudioApplicationMicrophoneInjectionPermissionGranted) {
 
+                            EnableInjection();
 
-    ShowPopup(message);
-}
+                        } else {
 
-
-static void RequestPermission(void) {
-
-    if (!@available(iOS 18.2, *)) {
-
-        ShowPopup(
-            @"This build requires iOS 18.2 or newer."
-        );
+                            Popup(
+                                @"Microphone injection permission "
+                                 "was not granted."
+                            );
+                        }
+                    }
+                );
+            }
+        ];
 
         return;
     }
 
-    AVAudioApplication *application =
-        [AVAudioApplication sharedInstance];
 
-    AVAudioApplicationMicrophoneInjectionPermission current =
-        application.microphoneInjectionPermission;
-
-
-    NSLog(
-        @"[SanneRealtime] Current permission: %@",
-        PermissionName(current)
-    );
-
-
-    /*
-     * Apple requires an explicit permission request.
-     * If already granted, this immediately returns GRANTED.
-     */
-    [AVAudioApplication
-        requestMicrophoneInjectionPermissionWithCompletionHandler:
-        ^(AVAudioApplicationMicrophoneInjectionPermission permission) {
-
-            dispatch_async(
-                dispatch_get_main_queue(),
-                ^{
-
-                    NSLog(
-                        @"[SanneRealtime] Permission result: %@",
-                        PermissionName(permission)
-                    );
-
-                    if (permission ==
-                        AVAudioApplicationMicrophoneInjectionPermissionGranted) {
-
-                        AVAudioSession *session =
-                            [AVAudioSession sharedInstance];
-
-                        BOOL available =
-                            session.isMicrophoneInjectionAvailable;
-
-                        ShowPopup(
-                            [NSString stringWithFormat:
-                                @"PERMISSION: GRANTED\n\n"
-                                 "INJECTION AVAILABLE: %@\n\n"
-                                 "No audio engine started.\n\n"
-                                 "This build is only testing "
-                                 "the iOS injection state.",
-                                available ? @"YES" : @"NO"]
-                        );
-
-                    } else {
-
-                        ShowPopup(
-                            [NSString stringWithFormat:
-                                @"PERMISSION: %@\n\n"
-                                 "Injection cannot be used "
-                                 "until permission is granted.",
-                                PermissionName(permission)]
-                        );
-                    }
-                }
-            );
-        }
-    ];
+    EnableInjection();
 }
 
 
@@ -217,51 +169,32 @@ static void InstallObserver(void) {
     if (!@available(iOS 18.2, *))
         return;
 
+    [[NSNotificationCenter defaultCenter]
+        addObserverForName:
+            AVAudioSessionMicrophoneInjectionCapabilitiesChangeNotification
+        object:nil
+        queue:[NSOperationQueue mainQueue]
+        usingBlock:^(NSNotification *notification) {
 
-    if (capabilityObserver) {
-        return;
-    }
+            AVAudioSession *session =
+                [AVAudioSession sharedInstance];
 
+            NSLog(
+                @"[SanneRealtime] Injection capability changed: %@",
+                session.isMicrophoneInjectionAvailable
+                    ? @"YES"
+                    : @"NO"
+            );
 
-    capabilityObserver =
-        [[NSNotificationCenter defaultCenter]
-            addObserverForName:
-                AVAudioSessionMicrophoneInjectionCapabilitiesChangeNotification
-            object:nil
-            queue:[NSOperationQueue mainQueue]
-            usingBlock:^(NSNotification *notification) {
+            /*
+             * Only act when the system reports YES.
+             */
+            if (session.isMicrophoneInjectionAvailable &&
+                !testRunning) {
 
-                AVAudioSession *session =
-                    [AVAudioSession sharedInstance];
-
-                BOOL available =
-                    session.isMicrophoneInjectionAvailable;
-
-
-                NSLog(
-                    @"[SanneRealtime] CAPABILITY CHANGED: %@",
-                    available ? @"YES" : @"NO"
-                );
-
-
-                AVAudioApplication *application =
-                    [AVAudioApplication sharedInstance];
-
-                NSString *permission =
-                    PermissionName(
-                        application.microphoneInjectionPermission
-                    );
-
-
-                ShowPopup(
-                    [NSString stringWithFormat:
-                        @"CAPABILITY CHANGED\n\n"
-                         "PERMISSION: %@\n\n"
-                         "INJECTION AVAILABLE: %@",
-                        permission,
-                        available ? @"YES" : @"NO"]
-                );
-            }];
+                EnableInjection();
+            }
+        }];
 }
 
 
@@ -269,21 +202,8 @@ __attribute__((constructor))
 static void SanneRealtimeLoaded(void) {
 
     NSLog(
-        @"[SanneRealtime] ========================"
+        @"[SanneRealtime] INJECTION TEST BUILD LOADED"
     );
-
-    NSLog(
-        @"[SanneRealtime] DIAGNOSTIC BUILD LOADED"
-    );
-
-    NSLog(
-        @"[SanneRealtime] NO AUDIO ENGINE"
-    );
-
-    NSLog(
-        @"[SanneRealtime] ========================"
-    );
-
 
     dispatch_async(
         dispatch_get_main_queue(),
@@ -291,9 +211,8 @@ static void SanneRealtimeLoaded(void) {
 
             InstallObserver();
 
-
             /*
-             * Let the host application finish loading.
+             * Wait for the host/call state to settle.
              */
             dispatch_after(
                 dispatch_time(
@@ -303,7 +222,7 @@ static void SanneRealtimeLoaded(void) {
                 dispatch_get_main_queue(),
                 ^{
 
-                    RequestPermission();
+                    CheckAndEnable();
                 }
             );
         }
