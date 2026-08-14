@@ -5,22 +5,22 @@
 static AVSpeechSynthesizer *gSynth = nil;
 
 static NSMutableArray<NSString *> *gRuntimeLog = nil;
-static BOOL gHasInterestingAudioEvent = NO;
 static BOOL gObserversStarted = NO;
 static BOOL gShowingDiagnostic = NO;
-
-#pragma mark - Runtime Log
+static BOOL gHasAudioEvents = NO;
 
 static void SRRecordLog(NSString *message)
 {
     if (!gRuntimeLog)
         gRuntimeLog = [NSMutableArray array];
 
+    NSDateFormatter *formatter =
+        [[NSDateFormatter alloc] init];
+
+    formatter.dateFormat = @"HH:mm:ss.SSS";
+
     NSString *time =
-        [NSDateFormatter localizedStringFromDate:
-            [NSDate date]
-            dateStyle:NSDateFormatterNoStyle
-            timeStyle:NSDateFormatterMediumStyle];
+        [formatter stringFromDate:[NSDate date]];
 
     NSString *entry =
         [NSString stringWithFormat:
@@ -30,18 +30,20 @@ static void SRRecordLog(NSString *message)
 
     [gRuntimeLog addObject:entry];
 
-    while (gRuntimeLog.count > 30) {
+    while (gRuntimeLog.count > 40) {
         [gRuntimeLog removeObjectAtIndex:0];
     }
 
-    NSLog(@"[SanneRealtime] %@", entry);
+    NSLog(
+        @"[SanneRealtime] %@",
+        entry
+    );
 }
-
-#pragma mark - Popup
 
 static void SRPopup(NSString *message)
 {
     dispatch_async(dispatch_get_main_queue(), ^{
+
         UIWindow *window = nil;
 
         if (@available(iOS 13.0, *)) {
@@ -100,8 +102,6 @@ static void SRPopup(NSString *message)
     });
 }
 
-#pragma mark - Permission
-
 static NSString *SRPermissionString(void)
 {
     if (@available(iOS 18.2, *)) {
@@ -128,8 +128,6 @@ static NSString *SRPermissionString(void)
 
     return @"UNAVAILABLE";
 }
-
-#pragma mark - Route Description
 
 static NSString *SRPortDescription(
     AVAudioSessionPortDescription *port
@@ -191,8 +189,6 @@ static NSString *SRRouteDescription(
     return result;
 }
 
-#pragma mark - Session Diagnostic
-
 static NSString *SRSessionDiagnostic(void)
 {
     if (!@available(iOS 18.2, *))
@@ -205,7 +201,6 @@ static NSString *SRSessionDiagnostic(void)
         session.currentRoute;
 
     return [NSString stringWithFormat:
-
         @"CATEGORY: %@\n"
          "MODE: %@\n"
          "INPUT AVAILABLE: %@\n"
@@ -243,6 +238,8 @@ static void SRRecordSessionState(
     NSString *reason
 )
 {
+    gHasAudioEvents = YES;
+
     NSString *state =
         SRSessionDiagnostic();
 
@@ -252,19 +249,16 @@ static void SRRecordSessionState(
             reason ?: @"UNKNOWN",
             state];
 
-    gHasInterestingAudioEvent = YES;
-
     SRRecordLog(message);
 }
-
-#pragma mark - Runtime Diagnostic Popup
 
 static void SRShowRuntimeDiagnostic(void)
 {
     if (gShowingDiagnostic)
         return;
 
-    if (!gRuntimeLog || gRuntimeLog.count == 0)
+    if (!gRuntimeLog ||
+        gRuntimeLog.count == 0)
         return;
 
     gShowingDiagnostic = YES;
@@ -277,8 +271,9 @@ static void SRShowRuntimeDiagnostic(void)
 
     NSUInteger startIndex = 0;
 
-    if (gRuntimeLog.count > 12) {
-        startIndex = gRuntimeLog.count - 12;
+    if (gRuntimeLog.count > 14) {
+        startIndex =
+            gRuntimeLog.count - 14;
     }
 
     for (NSUInteger i = startIndex;
@@ -290,34 +285,26 @@ static void SRShowRuntimeDiagnostic(void)
             gRuntimeLog[i]];
     }
 
+    [report appendString:
+        @"CURRENT STATE\n\n"];
+
+    [report appendString:
+        SRSessionDiagnostic()];
+
     if (report.length > 7000) {
-
-        NSRange range =
-            NSMakeRange(
-                report.length - 7000,
-                7000
-            );
-
-        NSString *tail =
-            [report substringWithRange:range];
 
         report =
             [NSMutableString
                 stringWithFormat:
                     @"...LAST EVENTS...\n\n%@",
-                    tail];
+                    [report substringFromIndex:
+                        report.length - 7000]];
     }
-
-    [report appendFormat:
-        @"\nCURRENT STATE\n\n%@",
-        SRSessionDiagnostic()];
 
     SRPopup(report);
 
     gShowingDiagnostic = NO;
 }
-
-#pragma mark - Known-Good Injection Test
 
 static AVSpeechSynthesisVoice *SRFemaleVoice(void)
 {
@@ -361,7 +348,7 @@ static void SRSpeakTest(void)
     utterance.volume = 1.0;
 
     SRRecordLog(
-        @"CONTROL TEST: AVSpeechSynthesizer test voice started."
+        @"CONTROL TEST: AVSpeechSynthesizer started."
     );
 
     [gSynth speakUtterance:utterance];
@@ -497,19 +484,6 @@ static void SREnableInjectionAndTest(void)
          "Female test voice will play now."
     );
 
-    /*
-     * CONTROL TEST ONLY.
-     *
-     * We deliberately do NOT:
-     *
-     * - activate the audio session
-     * - change the audio category
-     * - change the audio mode
-     * - create AVAudioEngine
-     * - install a microphone tap
-     * - take ownership of the audio route
-     */
-
     dispatch_after(
         dispatch_time(
             DISPATCH_TIME_NOW,
@@ -523,41 +497,22 @@ static void SREnableInjectionAndTest(void)
     );
 }
 
-#pragma mark - Route Change
-
 static void SRHandleRouteChange(
     NSNotification *notification
 )
 {
-    gHasInterestingAudioEvent = YES;
+    gHasAudioEvents = YES;
 
     NSNumber *reason =
         notification.userInfo[
             AVAudioSessionRouteChangeReasonKey
         ];
 
-    NSNumber *previousRoute =
-        notification.userInfo[
-            AVAudioSessionRouteChangePreviousRouteKey
-        ];
-
-    NSString *reasonText =
-        reason
-            ? [reason description]
-            : @"unknown";
-
-    NSString *previousText =
-        previousRoute
-            ? @"previous route available"
-            : @"no previous route object";
-
     SRRecordLog(
         [NSString stringWithFormat:
             @"ROUTE CHANGE\n"
-             "REASON: %@\n"
-             "%@",
-            reasonText,
-            previousText]
+             "REASON: %@",
+            reason ?: @"unknown"]
     );
 
     SRRecordSessionState(
@@ -565,13 +520,11 @@ static void SRHandleRouteChange(
     );
 }
 
-#pragma mark - Injection Capability Change
-
 static void SRHandleCapabilityChange(
     NSNotification *notification
 )
 {
-    gHasInterestingAudioEvent = YES;
+    gHasAudioEvents = YES;
 
     AVAudioSession *session =
         AVAudioSession.sharedInstance;
@@ -586,9 +539,13 @@ static void SRHandleCapabilityChange(
             @"INJECTION CAPABILITY CHANGE\n"
              "NOTIFICATION AVAILABLE: %@\n"
              "SESSION AVAILABLE: %@",
+
             available
-                ? (available.boolValue ? @"YES" : @"NO")
+                ? (available.boolValue
+                    ? @"YES"
+                    : @"NO")
                 : @"UNKNOWN",
+
             session.isMicrophoneInjectionAvailable
                 ? @"YES"
                 : @"NO"]
@@ -599,13 +556,11 @@ static void SRHandleCapabilityChange(
     );
 }
 
-#pragma mark - Interruption
-
 static void SRHandleInterruption(
     NSNotification *notification
 )
 {
-    gHasInterestingAudioEvent = YES;
+    gHasAudioEvents = YES;
 
     NSNumber *type =
         notification.userInfo[
@@ -631,13 +586,11 @@ static void SRHandleInterruption(
     );
 }
 
-#pragma mark - Media Services Reset
-
 static void SRHandleMediaServicesReset(
     NSNotification *notification
 )
 {
-    gHasInterestingAudioEvent = YES;
+    gHasAudioEvents = YES;
 
     SRRecordLog(
         @"MEDIA SERVICES RESET"
@@ -648,40 +601,6 @@ static void SRHandleMediaServicesReset(
     );
 }
 
-#pragma mark - Audio Session Activation State
-
-static void SRHandleAudioSessionActive(
-    NSNotification *notification
-)
-{
-    gHasInterestingAudioEvent = YES;
-
-    SRRecordLog(
-        @"AUDIO SESSION DID BECOME ACTIVE"
-    );
-
-    SRRecordSessionState(
-        @"AUDIO SESSION ACTIVE"
-    );
-}
-
-static void SRHandleAudioSessionInactive(
-    NSNotification *notification
-)
-{
-    gHasInterestingAudioEvent = YES;
-
-    SRRecordLog(
-        @"AUDIO SESSION DID BECOME INACTIVE"
-    );
-
-    SRRecordSessionState(
-        @"AUDIO SESSION INACTIVE"
-    );
-}
-
-#pragma mark - App Became Active
-
 static void SRHandleApplicationDidBecomeActive(
     NSNotification *notification
 )
@@ -689,23 +608,16 @@ static void SRHandleApplicationDidBecomeActive(
     if (!gObserversStarted)
         return;
 
-    if (!gHasInterestingAudioEvent)
+    if (!gHasAudioEvents)
         return;
 
-    /*
-     * Give the audio session a moment to settle after
-     * returning to Nobanny before displaying the report.
-     */
     dispatch_after(
         dispatch_time(
             DISPATCH_TIME_NOW,
-            800 * NSEC_PER_MSEC
+            1000 * NSEC_PER_MSEC
         ),
         dispatch_get_main_queue(),
         ^{
-
-            if (!gHasInterestingAudioEvent)
-                return;
 
             SRRecordSessionState(
                 @"RETURNED TO NOBANNY"
@@ -715,8 +627,6 @@ static void SRHandleApplicationDidBecomeActive(
         }
     );
 }
-
-#pragma mark - Observers
 
 static void SRStartPassiveObservers(void)
 {
@@ -747,12 +657,12 @@ static void SRStartPassiveObservers(void)
                     object:nil
                     queue:NSOperationQueue.mainQueue
                     usingBlock:
-            ^(NSNotification *notification) {
+        ^(NSNotification *notification) {
 
-                SRHandleCapabilityChange(
-                    notification
-                );
-            }];
+            SRHandleCapabilityChange(
+                notification
+            );
+        }];
     }
 
     [center addObserverForName:
@@ -780,30 +690,6 @@ static void SRStartPassiveObservers(void)
         }];
 
     [center addObserverForName:
-                AVAudioSessionDidBecomeActiveNotification
-                object:nil
-                queue:NSOperationQueue.mainQueue
-                usingBlock:
-        ^(NSNotification *notification) {
-
-            SRHandleAudioSessionActive(
-                notification
-            );
-        }];
-
-    [center addObserverForName:
-                AVAudioSessionDidBecomeInactiveNotification
-                object:nil
-                queue:NSOperationQueue.mainQueue
-                usingBlock:
-        ^(NSNotification *notification) {
-
-            SRHandleAudioSessionInactive(
-                notification
-            );
-        }];
-
-    [center addObserverForName:
                 UIApplicationDidBecomeActiveNotification
                 object:nil
                 queue:NSOperationQueue.mainQueue
@@ -820,8 +706,6 @@ static void SRStartPassiveObservers(void)
     );
 }
 
-#pragma mark - Initial Diagnostic
-
 static void SRInitialDiagnostic(void)
 {
     SRRecordSessionState(
@@ -830,8 +714,6 @@ static void SRInitialDiagnostic(void)
 
     SREnableInjectionAndTest();
 }
-
-#pragma mark - Constructor
 
 __attribute__((constructor))
 static void SanneRealtimeLoaded(void)
