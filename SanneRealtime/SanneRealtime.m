@@ -2,11 +2,12 @@
 #import <UIKit/UIKit.h>
 #import <AVFAudio/AVFAudio.h>
 
-static NSMutableArray<NSString *> *SREvents;
-static UILabel *SROverlayLabel = nil;
-static UIWindow *SROverlayWindow = nil;
+static NSMutableArray<NSString *> *SREvents = nil;
+static UILabel *SRLabel = nil;
+static UIView *SRPanel = nil;
+static UIWindow *SRHostWindow = nil;
 
-#pragma mark - Audio Helpers
+#pragma mark - Audio
 
 static AVAudioSession *SRSession(void)
 {
@@ -57,7 +58,8 @@ static NSString *SRInjectionMode(
 
 static NSString *SRRoute(void)
 {
-    AVAudioSession *session = SRSession();
+    AVAudioSession *session =
+        SRSession();
 
     AVAudioSessionRouteDescription *route =
         session.currentRoute;
@@ -70,7 +72,8 @@ static NSString *SRRoute(void)
         AVAudioSessionPortDescription *port =
             route.inputs.firstObject;
 
-        input = port.portName ?: @"UNKNOWN";
+        input =
+            port.portName ?: @"UNKNOWN";
     }
 
     if (route.outputs.count > 0) {
@@ -78,7 +81,8 @@ static NSString *SRRoute(void)
         AVAudioSessionPortDescription *port =
             route.outputs.firstObject;
 
-        output = port.portName ?: @"UNKNOWN";
+        output =
+            port.portName ?: @"UNKNOWN";
     }
 
     return [NSString stringWithFormat:
@@ -87,7 +91,7 @@ static NSString *SRRoute(void)
         output];
 }
 
-#pragma mark - Event Logging
+#pragma mark - Time
 
 static NSString *SRTime(void)
 {
@@ -100,6 +104,55 @@ static NSString *SRTime(void)
     return [formatter stringFromDate:[NSDate date]];
 }
 
+#pragma mark - Existing Window
+
+static UIWindow *SRFindHostWindow(void)
+{
+    UIApplication *application =
+        [UIApplication sharedApplication];
+
+    UIWindow *fallback = nil;
+
+    for (UIScene *scene
+         in application.connectedScenes) {
+
+        if (![scene isKindOfClass:[UIWindowScene class]]) {
+            continue;
+        }
+
+        UIWindowScene *windowScene =
+            (UIWindowScene *)scene;
+
+        if (windowScene.activationState ==
+            UISceneActivationStateUnattached) {
+            continue;
+        }
+
+        for (UIWindow *window
+             in windowScene.windows) {
+
+            if (window.hidden) {
+                continue;
+            }
+
+            if (window.isKeyWindow) {
+                return window;
+            }
+
+            if (!fallback &&
+                window.windowLevel ==
+                    UIWindowLevelNormal) {
+
+                fallback = window;
+            }
+        }
+    }
+
+    return fallback;
+}
+
+#pragma mark - Overlay Text
+
 static void SRRefreshOverlay(void);
 
 static void SREvent(NSString *event)
@@ -109,7 +162,8 @@ static void SREvent(NSString *event)
         ^{
 
             if (!SREvents) {
-                SREvents = [NSMutableArray array];
+                SREvents =
+                    [NSMutableArray array];
             }
 
             NSString *line =
@@ -120,7 +174,7 @@ static void SREvent(NSString *event)
 
             [SREvents addObject:line];
 
-            if (SREvents.count > 12) {
+            if (SREvents.count > 10) {
                 [SREvents removeObjectAtIndex:0];
             }
 
@@ -132,31 +186,7 @@ static void SREvent(NSString *event)
         });
 }
 
-#pragma mark - Window Scene
-
-static UIWindowScene *SRActiveWindowScene(void)
-{
-    for (UIScene *scene
-         in UIApplication.sharedApplication.connectedScenes) {
-
-        if (![scene isKindOfClass:[UIWindowScene class]]) {
-            continue;
-        }
-
-        UIWindowScene *windowScene =
-            (UIWindowScene *)scene;
-
-        if (windowScene.activationState ==
-            UISceneActivationStateForegroundActive) {
-
-            return windowScene;
-        }
-    }
-
-    return nil;
-}
-
-#pragma mark - Overlay
+#pragma mark - Overlay Creation
 
 static void SRCreateOverlay(void)
 {
@@ -164,136 +194,138 @@ static void SRCreateOverlay(void)
         dispatch_get_main_queue(),
         ^{
 
-            if (SROverlayWindow) {
+            if (SRPanel &&
+                SRPanel.superview) {
+
+                SRRefreshOverlay();
                 return;
             }
 
-            UIWindowScene *scene =
-                SRActiveWindowScene();
+            UIWindow *window =
+                SRFindHostWindow();
 
-            if (!scene) {
-
+            if (!window) {
                 return;
             }
 
-            CGRect screenBounds =
-                scene.screen.bounds;
-
-            CGFloat overlayWidth = 282.0;
-            CGFloat overlayHeight = 175.0;
-
-            CGFloat x =
-                screenBounds.size.width -
-                overlayWidth -
-                10.0;
-
-            CGFloat y = 70.0;
-
-            if (x < 5.0) {
-                x = 5.0;
-            }
-
-            SROverlayWindow =
-                [[UIWindow alloc]
-                    initWithWindowScene:scene];
-
-            SROverlayWindow.frame =
-                CGRectMake(
-                    x,
-                    y,
-                    overlayWidth,
-                    overlayHeight);
-
-            SROverlayWindow.windowLevel =
-                UIWindowLevelAlert + 1;
-
-            SROverlayWindow.backgroundColor =
-                [UIColor clearColor];
-
-            /*
-             * Critical:
-             * The diagnostic overlay does NOT receive
-             * touch events. Nobanny remains usable.
-             */
-
-            SROverlayWindow.userInteractionEnabled =
-                NO;
+            SRHostWindow =
+                window;
 
             UIViewController *controller =
-                [[UIViewController alloc] init];
+                window.rootViewController;
 
-            controller.view.backgroundColor =
-                [UIColor clearColor];
+            if (!controller) {
+                return;
+            }
 
-            SROverlayWindow.rootViewController =
-                controller;
+            /*
+             Put the diagnostic panel directly into the
+             existing host window.
 
-            UIView *panel =
-                [[UIView alloc] initWithFrame:
-                    controller.view.bounds];
+             It is deliberately non-interactive.
+            */
 
-            panel.autoresizingMask =
-                UIViewAutoresizingFlexibleWidth |
-                UIViewAutoresizingFlexibleHeight;
+            SRPanel =
+                [[UIView alloc] init];
 
-            panel.backgroundColor =
+            SRPanel.translatesAutoresizingMaskIntoConstraints =
+                NO;
+
+            SRPanel.backgroundColor =
                 [[UIColor blackColor]
-                    colorWithAlphaComponent:0.82];
+                    colorWithAlphaComponent:0.86];
 
-            panel.layer.cornerRadius =
-                12.0;
+            SRPanel.layer.cornerRadius =
+                10.0;
 
-            panel.layer.masksToBounds =
+            SRPanel.layer.masksToBounds =
                 YES;
 
-            [controller.view addSubview:panel];
+            SRPanel.userInteractionEnabled =
+                NO;
 
-            SROverlayLabel =
+            [window addSubview:SRPanel];
+
+            CGFloat width = 275.0;
+            CGFloat height = 145.0;
+
+            [NSLayoutConstraint activateConstraints:@[
+
+                [SRPanel.topAnchor
+                    constraintEqualToAnchor:
+                        window.safeAreaLayoutGuide.topAnchor
+                    constant:8.0],
+
+                [SRPanel.trailingAnchor
+                    constraintEqualToAnchor:
+                        window.trailingAnchor
+                    constant:-8.0],
+
+                [SRPanel.widthAnchor
+                    constraintEqualToConstant:width],
+
+                [SRPanel.heightAnchor
+                    constraintEqualToConstant:height]
+            ]];
+
+            SRLabel =
                 [[UILabel alloc] init];
 
-            CGFloat padding = 9.0;
+            SRLabel.translatesAutoresizingMaskIntoConstraints =
+                NO;
 
-            SROverlayLabel.frame =
-                CGRectMake(
-                    padding,
-                    7.0,
-                    overlayWidth -
-                        (padding * 2.0),
-                    overlayHeight -
-                        14.0);
-
-            SROverlayLabel.autoresizingMask =
-                UIViewAutoresizingFlexibleWidth |
-                UIViewAutoresizingFlexibleHeight;
-
-            SROverlayLabel.numberOfLines =
+            SRLabel.numberOfLines =
                 0;
 
-            SROverlayLabel.font =
+            SRLabel.font =
                 [UIFont monospacedSystemFontOfSize:
-                    10.0
+                    9.5
                     weight:UIFontWeightRegular];
 
-            SROverlayLabel.textColor =
+            SRLabel.textColor =
                 UIColor.whiteColor;
 
-            SROverlayLabel.adjustsFontSizeToFitWidth =
+            SRLabel.backgroundColor =
+                UIColor.clearColor;
+
+            SRLabel.userInteractionEnabled =
                 NO;
 
-            [panel addSubview:
-                SROverlayLabel];
+            [SRPanel addSubview:SRLabel];
 
-            SROverlayWindow.hidden =
-                NO;
+            [NSLayoutConstraint activateConstraints:@[
 
-            [SROverlayWindow makeKeyAndVisible];
+                [SRLabel.topAnchor
+                    constraintEqualToAnchor:
+                        SRPanel.topAnchor
+                    constant:7.0],
+
+                [SRLabel.leadingAnchor
+                    constraintEqualToAnchor:
+                        SRPanel.leadingAnchor
+                    constant:8.0],
+
+                [SRLabel.trailingAnchor
+                    constraintEqualToAnchor:
+                        SRPanel.trailingAnchor
+                    constant:-8.0],
+
+                [SRLabel.bottomAnchor
+                    constraintEqualToAnchor:
+                        SRPanel.bottomAnchor
+                    constant:-7.0]
+            ]];
+
+            [window bringSubviewToFront:SRPanel];
 
             SREvent(
-                @"OVERLAY READY");
+                @"OVERLAY ATTACHED TO HOST WINDOW");
 
             SRRefreshOverlay();
         });
 }
+
+#pragma mark - Overlay Refresh
 
 static void SRRefreshOverlay(void)
 {
@@ -301,42 +333,47 @@ static void SRRefreshOverlay(void)
         dispatch_get_main_queue(),
         ^{
 
-            if (!SROverlayLabel) {
+            if (!SRLabel) {
                 return;
             }
 
             AVAudioSession *session =
                 SRSession();
 
-            NSString *current =
-                [NSString stringWithFormat:
-
-                    @"SANNE REALTIME\n"
-                     "P:%@ I:%@ M:%@\n"
-                     "CAT:%@ IN:%ld SR:%.0f\n"
-                     "ROUTE:%@\n"
-                     "----------------\n",
-
-                    SRPermission(),
-
-                    session.isMicrophoneInjectionAvailable
-                        ? @"YES"
-                        : @"NO",
-
-                    SRInjectionMode(
-                        session.preferredMicrophoneInjectionMode),
-
-                    session.category ?: @"NONE",
-
-                    (long)session.inputNumberOfChannels,
-
-                    session.sampleRate,
-
-                    SRRoute()];
-
             NSMutableString *text =
-                [NSMutableString stringWithString:
-                    current];
+                [NSMutableString string];
+
+            [text appendFormat:
+                @"SANNE REALTIME\n"];
+
+            [text appendFormat:
+                @"P:%@  I:%@  M:%@\n",
+                SRPermission(),
+                session.isMicrophoneInjectionAvailable
+                    ? @"YES"
+                    : @"NO",
+                SRInjectionMode(
+                    session.preferredMicrophoneInjectionMode)];
+
+            [text appendFormat:
+                @"CAT:%@  MODE:%@\n",
+                session.category ?: @"NONE",
+                session.mode ?: @"NONE"];
+
+            [text appendFormat:
+                @"INPUT:%@  CH:%ld  SR:%.0f\n",
+                session.isInputAvailable
+                    ? @"YES"
+                    : @"NO",
+                (long)session.inputNumberOfChannels,
+                session.sampleRate];
+
+            [text appendFormat:
+                @"ROUTE:%@\n",
+                SRRoute()];
+
+            [text appendString:
+                @"----------------------\n"];
 
             if (SREvents.count == 0) {
 
@@ -345,15 +382,23 @@ static void SRRefreshOverlay(void)
 
             } else {
 
-                for (NSString *event in SREvents) {
+                for (NSString *event
+                     in SREvents) {
 
                     [text appendString:event];
                     [text appendString:@"\n"];
                 }
             }
 
-            SROverlayLabel.text =
+            SRLabel.text =
                 text;
+
+            if (SRPanel &&
+                SRPanel.superview) {
+
+                [SRPanel.superview
+                    bringSubviewToFront:SRPanel];
+            }
         });
 }
 
@@ -380,14 +425,14 @@ static void SRInjectionCapabilityChanged(
 
     SREvent(
         [NSString stringWithFormat:
-            @"INJECTION EVENT: %@",
+            @"INJECTION EVENT:%@",
             available
                 ? @"YES"
                 : @"NO"]);
 
     SREvent(
         [NSString stringWithFormat:
-            @"INPUT: %@/%ld",
+            @"INPUT:%@/%ld",
             session.isInputAvailable
                 ? @"YES"
                 : @"NO",
@@ -395,7 +440,7 @@ static void SRInjectionCapabilityChanged(
 
     SREvent(
         [NSString stringWithFormat:
-            @"SESSION: %@/%@",
+            @"SESSION:%@/%@",
             session.category ?: @"NONE",
             session.mode ?: @"NONE"]);
 
@@ -414,13 +459,13 @@ static void SRInjectionCapabilityChanged(
             if (success) {
 
                 SREvent(
-                    @"SPOKEN MODE: SUCCESS");
+                    @"SPOKEN MODE:SUCCESS");
 
             } else {
 
                 SREvent(
                     [NSString stringWithFormat:
-                        @"SPOKEN MODE: FAILED %@",
+                        @"SPOKEN MODE:FAILED:%@",
                         error.localizedDescription
                             ?: @"UNKNOWN"]);
             }
@@ -428,38 +473,27 @@ static void SRInjectionCapabilityChanged(
     }
 }
 
-#pragma mark - Route Changes
+#pragma mark - Route
 
 static void SRRouteChanged(
     NSNotification *notification)
 {
-    AVAudioSession *session =
-        SRSession();
-
     NSNumber *reason =
         notification.userInfo[
             AVAudioSessionRouteChangeReasonKey];
 
     SREvent(
         [NSString stringWithFormat:
-            @"ROUTE CHANGE: %ld",
+            @"ROUTE CHANGE:%ld",
             (long)reason.integerValue]);
 
     SREvent(
         [NSString stringWithFormat:
-            @"ROUTE: %@",
+            @"ROUTE:%@",
             SRRoute()]);
-
-    SREvent(
-        [NSString stringWithFormat:
-            @"INPUT: %@/%ld",
-            session.isInputAvailable
-                ? @"YES"
-                : @"NO",
-            (long)session.inputNumberOfChannels]);
 }
 
-#pragma mark - Interruptions
+#pragma mark - Interruption
 
 static void SRInterruptionChanged(
     NSNotification *notification)
@@ -472,37 +506,29 @@ static void SRInterruptionChanged(
         AVAudioSessionInterruptionTypeBegan) {
 
         SREvent(
-            @"INTERRUPTION: BEGAN");
+            @"INTERRUPTION:BEGAN");
 
     } else {
 
         SREvent(
-            @"INTERRUPTION: ENDED");
+            @"INTERRUPTION:ENDED");
     }
 }
 
-#pragma mark - App Lifecycle
+#pragma mark - Application Lifecycle
 
-static void SRAppActive(
+static void SRApplicationActive(
     NSNotification *notification)
 {
-    AVAudioSession *session =
-        SRSession();
-
     SREvent(
-        [NSString stringWithFormat:
-            @"APP ACTIVE: I=%@ C=%@",
-            session.isMicrophoneInjectionAvailable
-                ? @"YES"
-                : @"NO",
-            session.category ?: @"NONE"]);
+        @"APPLICATION:ACTIVE");
 }
 
-static void SRAppInactive(
+static void SRApplicationInactive(
     NSNotification *notification)
 {
     SREvent(
-        @"APP RESIGN ACTIVE");
+        @"APPLICATION:INACTIVE");
 }
 
 #pragma mark - Observers
@@ -555,7 +581,8 @@ static void SRInstallObservers(void)
         usingBlock:
         ^(NSNotification *notification) {
 
-            SRAppActive(notification);
+            SRApplicationActive(
+                notification);
         }];
 
     [center
@@ -566,11 +593,9 @@ static void SRInstallObservers(void)
         usingBlock:
         ^(NSNotification *notification) {
 
-            SRAppInactive(notification);
+            SRApplicationInactive(
+                notification);
         }];
-
-    SREvent(
-        @"OBSERVERS INSTALLED");
 }
 
 #pragma mark - Constructor
@@ -609,25 +634,21 @@ static void SanneRealtimeInit(void)
                 dispatch_after(
                     dispatch_time(
                         DISPATCH_TIME_NOW,
-                        1500 * NSEC_PER_MSEC),
+                        1000 * NSEC_PER_MSEC),
                     dispatch_get_main_queue(),
                     ^{
 
-                        if (!SROverlayWindow) {
-                            SRCreateOverlay();
-                        }
+                        SRCreateOverlay();
                     });
 
                 dispatch_after(
                     dispatch_time(
                         DISPATCH_TIME_NOW,
-                        3000 * NSEC_PER_MSEC),
+                        2500 * NSEC_PER_MSEC),
                     dispatch_get_main_queue(),
                     ^{
 
-                        if (!SROverlayWindow) {
-                            SRCreateOverlay();
-                        }
+                        SRCreateOverlay();
                     });
             });
     }
