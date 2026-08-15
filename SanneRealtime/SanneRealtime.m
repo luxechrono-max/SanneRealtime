@@ -2,8 +2,6 @@
 #import <UIKit/UIKit.h>
 #import <AVFAudio/AVFAudio.h>
 
-#pragma mark - Globals
-
 static AVSpeechSynthesizer *gSynth = nil;
 static AVAudioEngine *gEngine = nil;
 
@@ -16,19 +14,15 @@ static uint64_t gCallbackCount = 0;
 static float gPeak = 0.0f;
 static float gRMS = 0.0f;
 
-#pragma mark - Popup
-
 static UIWindow *SRKeyWindow(void)
 {
-    for (UIScene *scene
-         in [UIApplication sharedApplication].connectedScenes) {
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
 
         if (![scene isKindOfClass:[UIWindowScene class]]) {
             continue;
         }
 
-        UIWindowScene *windowScene =
-            (UIWindowScene *)scene;
+        UIWindowScene *windowScene = (UIWindowScene *)scene;
 
         if (windowScene.activationState !=
             UISceneActivationStateForegroundActive) {
@@ -53,7 +47,7 @@ static void SRPopup(NSString *message)
         UIWindow *window = SRKeyWindow();
 
         if (!window) {
-            NSLog(@"[SanneRealtime] POPUP: %@", message);
+            NSLog(@"[SanneRealtime] %@", message);
             return;
         }
 
@@ -84,8 +78,6 @@ static void SRPopup(NSString *message)
     });
 }
 
-#pragma mark - Permission
-
 static NSString *SRPermissionString(void)
 {
     if (@available(iOS 18.2, *)) {
@@ -112,8 +104,6 @@ static NSString *SRPermissionString(void)
 
     return @"UNAVAILABLE";
 }
-
-#pragma mark - Voice
 
 static AVSpeechSynthesisVoice *SRFemaleVoice(void)
 {
@@ -168,8 +158,6 @@ static void SRSpeakKnownGoodTest(void)
 
     [gSynth speakUtterance:utterance];
 }
-
-#pragma mark - Audio State
 
 static NSString *SRRouteDescription(void)
 {
@@ -257,8 +245,6 @@ static NSString *SRSessionReport(void)
             SRRouteDescription()];
 }
 
-#pragma mark - Capture Statistics
-
 static void SRResetCaptureStats(void)
 {
     gCapturedFrames = 0;
@@ -267,8 +253,7 @@ static void SRResetCaptureStats(void)
     gRMS = 0.0f;
 }
 
-static void SRProcessBuffer(
-    AVAudioPCMBuffer *buffer)
+static void SRProcessBuffer(AVAudioPCMBuffer *buffer)
 {
     if (!buffer) {
         return;
@@ -299,9 +284,6 @@ static void SRProcessBuffer(
     double sumSquares =
         0.0;
 
-    AVAudioFrameCount count =
-        frames;
-
     if (buffer.floatChannelData) {
 
         for (AVAudioChannelCount channel = 0;
@@ -316,7 +298,7 @@ static void SRProcessBuffer(
             }
 
             for (AVAudioFrameCount frame = 0;
-                 frame < count;
+                 frame < frames;
                  frame++) {
 
                 float value =
@@ -337,7 +319,7 @@ static void SRProcessBuffer(
         }
 
         double sampleCount =
-            (double)count *
+            (double)frames *
             (double)channels;
 
         if (sampleCount > 0.0) {
@@ -354,8 +336,6 @@ static void SRProcessBuffer(
         }
     }
 }
-
-#pragma mark - Start Capture
 
 static void SRStartCapture(void)
 {
@@ -375,20 +355,8 @@ static void SRStartCapture(void)
         @"[SanneRealtime] START CAPTURE REQUEST");
 
     NSLog(
-        @"[SanneRealtime] %@", SRSessionReport());
-
-    /*
-     IMPORTANT:
-
-     We do NOT call:
-       setCategory:
-       setMode:
-       setActive:
-
-     Discord/Nobanny owns the active call session.
-
-     We only attempt to read the already-active input.
-    */
+        @"[SanneRealtime] %@",
+        SRSessionReport());
 
     if (!session.isInputAvailable) {
 
@@ -464,11 +432,6 @@ static void SRStartCapture(void)
 
     SRResetCaptureStats();
 
-    /*
-     The tap only copies/inspects live PCM.
-     It does NOT modify the audio.
-    */
-
     [inputNode
         installTapOnBus:0
         bufferSize:1024
@@ -481,29 +444,19 @@ static void SRStartCapture(void)
             SRProcessBuffer(buffer);
         }];
 
+    /*
+     AVAudioEngine prepare returns void.
+     It does not return BOOL.
+    */
+
+    [gEngine prepare];
+
     NSError *engineError =
         nil;
 
-    BOOL prepared =
-        [gEngine prepare];
-
-    if (!prepared) {
-
-        [inputNode
-            removeTapOnBus:0];
-
-        gEngine =
-            nil;
-
-        SRPopup(
-            @"AVAudioEngine prepare failed.");
-
-        return;
-    }
-
     BOOL started =
-        [gEngine startAndReturnError:
-            &engineError];
+        [gEngine
+            startAndReturnError:&engineError];
 
     if (!started) {
 
@@ -519,8 +472,7 @@ static void SRStartCapture(void)
 
         SRPopup(
             [NSString stringWithFormat:
-                @"REALTIME CAPTURE FAILED.\n\n"
-                 "%@",
+                @"REALTIME CAPTURE FAILED.\n\n%@",
                 errorText]);
 
         NSLog(
@@ -564,11 +516,6 @@ static void SRStartCapture(void)
             });
     }
 
-    /*
-     Give the capture experiment 8 seconds,
-     then report whether actual PCM arrived.
-    */
-
     dispatch_after(
         dispatch_time(
             DISPATCH_TIME_NOW,
@@ -580,10 +527,13 @@ static void SRStartCapture(void)
                 return;
             }
 
+            AVAudioSession *currentSession =
+                [AVAudioSession sharedInstance];
+
             double duration =
-                session.sampleRate > 0.0
+                currentSession.sampleRate > 0.0
                 ? (double)gCapturedFrames /
-                    session.sampleRate
+                    currentSession.sampleRate
                 : 0.0;
 
             SRPopup(
@@ -603,43 +553,6 @@ static void SRStartCapture(void)
                     gRMS]);
         });
 }
-
-#pragma mark - Stop Capture
-
-static void SRStopCapture(void)
-{
-    if (!gEngine) {
-        gCaptureRunning =
-            NO;
-
-        return;
-    }
-
-    AVAudioInputNode *inputNode =
-        gEngine.inputNode;
-
-    @try {
-
-        [inputNode
-            removeTapOnBus:0];
-
-    }
-    @catch (__unused NSException *exception) {
-    }
-
-    [gEngine stop];
-
-    gEngine =
-        nil;
-
-    gCaptureRunning =
-        NO;
-
-    NSLog(
-        @"[SanneRealtime] LIVE PCM CAPTURE STOPPED");
-}
-
-#pragma mark - Injection Setup
 
 static void SREnableKnownGoodInjection(void)
 {
@@ -705,15 +618,8 @@ static void SREnableKnownGoodInjection(void)
     NSLog(
         @"[SanneRealtime] SPOKEN AUDIO MODE ENABLED");
 
-    /*
-     Start the actual live-input experiment only after
-     the already-proven injection mode is enabled.
-    */
-
     SRStartCapture();
 }
-
-#pragma mark - Capability Observer
 
 static void SRCapabilityChanged(
     NSNotification *notification)
@@ -737,14 +643,11 @@ static void SRCapabilityChanged(
             session.inputNumberOfChannels > 0) {
 
             if (!gCaptureRunning) {
-
                 SREnableKnownGoodInjection();
             }
         }
     }
 }
-
-#pragma mark - Route Observer
 
 static void SRRouteChanged(
     NSNotification *notification)
@@ -758,10 +661,13 @@ static void SRRouteChanged(
         @"[SanneRealtime] %@",
         SRSessionReport());
 
+    AVAudioSession *session =
+        [AVAudioSession sharedInstance];
+
     if (!gCaptureRunning &&
-        [AVAudioSession sharedInstance].isInputAvailable &&
-        [AVAudioSession sharedInstance].inputNumberOfChannels > 0 &&
-        [AVAudioSession sharedInstance].isMicrophoneInjectionAvailable) {
+        session.isInputAvailable &&
+        session.inputNumberOfChannels > 0 &&
+        session.isMicrophoneInjectionAvailable) {
 
         dispatch_after(
             dispatch_time(
@@ -774,8 +680,6 @@ static void SRRouteChanged(
             });
     }
 }
-
-#pragma mark - Interruption Observer
 
 static void SRInterruption(
     NSNotification *notification)
@@ -802,8 +706,6 @@ static void SRInterruption(
         SRSessionReport());
 }
 
-#pragma mark - Application State
-
 static void SRApplicationActive(
     NSNotification *notification)
 {
@@ -829,8 +731,6 @@ static void SRApplicationInactive(
         @"[SanneRealtime] %@",
         SRSessionReport());
 }
-
-#pragma mark - Observers
 
 static void SRInstallObservers(void)
 {
@@ -896,8 +796,6 @@ static void SRInstallObservers(void)
         @"[SanneRealtime] OBSERVERS INSTALLED");
 }
 
-#pragma mark - Startup
-
 static void SRStartup(void)
 {
     NSLog(
@@ -914,11 +812,6 @@ static void SRStartup(void)
         SRSessionReport());
 
     SRInstallObservers();
-
-    /*
-     If the call is already active when the dylib starts,
-     wait for the existing session to expose input/injection.
-    */
 
     dispatch_after(
         dispatch_time(
@@ -965,8 +858,6 @@ static void SRStartup(void)
             }
         });
 }
-
-#pragma mark - Constructor
 
 __attribute__((constructor))
 static void SanneRealtimeLoaded(void)
