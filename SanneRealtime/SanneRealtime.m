@@ -2,46 +2,53 @@
 #import <UIKit/UIKit.h>
 #import <AVFAudio/AVFAudio.h>
 
+#pragma mark - Global State
+
 static NSMutableArray<NSString *> *SRLog;
 
-static NSString *SRNow(void)
-{
-    NSDateFormatter *formatter =
-        [[NSDateFormatter alloc] init];
+static BOOL SRObserversInstalled = NO;
+static BOOL SRCapabilityPopupShown = NO;
+static BOOL SRPermissionPopupShown = NO;
 
+#pragma mark - Time / Logging
+
+static NSString *SRNow(void) {
+    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
     formatter.dateFormat = @"HH:mm:ss.SSS";
-
     return [formatter stringFromDate:[NSDate date]];
 }
 
-static void SRLogLine(NSString *text)
-{
+static void SRLogLine(NSString *text) {
+
     if (!SRLog) {
         SRLog = [NSMutableArray array];
     }
 
     NSString *line =
-        [NSString stringWithFormat:
-            @"[%@] %@",
-            SRNow(),
-            text];
+        [NSString stringWithFormat:@"[%@] %@",
+         SRNow(),
+         text];
 
     [SRLog addObject:line];
 
-    if (SRLog.count > 150) {
+    if (SRLog.count > 200) {
         [SRLog removeObjectAtIndex:0];
     }
 
     NSLog(@"[SanneRealtime] %@", line);
 }
 
-static NSString *SRPermission(void)
-{
+#pragma mark - Permission
+
+static NSString *SRPermission(void) {
+
     if (@available(iOS 18.2, *)) {
 
+        AVAudioApplication *application =
+            [AVAudioApplication sharedInstance];
+
         AVAudioApplicationMicrophoneInjectionPermission permission =
-            [AVAudioApplication sharedInstance]
-                .microphoneInjectionPermission;
+            application.microphoneInjectionPermission;
 
         switch (permission) {
 
@@ -62,22 +69,56 @@ static NSString *SRPermission(void)
     return @"UNAVAILABLE";
 }
 
-static NSString *SRCategory(AVAudioSession *session)
-{
-    return session.category ?: @"<none>";
+#pragma mark - Audio Session Helpers
+
+static AVAudioSession *SRSession(void) {
+    return [AVAudioSession sharedInstance];
 }
 
-static NSString *SRMode(AVAudioSession *session)
-{
-    return session.mode ?: @"<none>";
+static NSString *SRCategory(AVAudioSession *session) {
+
+    if (!session.category) {
+        return @"<none>";
+    }
+
+    return session.category;
 }
 
-static NSString *SRSessionReport(void)
-{
-    AVAudioSession *session =
-        [AVAudioSession sharedInstance];
+static NSString *SRMode(AVAudioSession *session) {
+
+    if (!session.mode) {
+        return @"<none>";
+    }
+
+    return session.mode;
+}
+
+static NSString *SRInjectionModeName(
+    AVAudioSessionMicrophoneInjectionMode mode
+) {
+
+    switch (mode) {
+
+        case AVAudioSessionMicrophoneInjectionModeNone:
+            return @"NONE";
+
+        case AVAudioSessionMicrophoneInjectionModeSpokenAudio:
+            return @"SPOKEN_AUDIO";
+    }
 
     return [NSString stringWithFormat:
+        @"UNKNOWN(%ld)",
+        (long)mode];
+}
+
+#pragma mark - Audio Report
+
+static NSString *SRSessionReport(void) {
+
+    AVAudioSession *session = SRSession();
+
+    return [NSString stringWithFormat:
+
         @"CATEGORY: %@\n"
          "MODE: %@\n"
          "INPUT AVAILABLE: %@\n"
@@ -86,10 +127,11 @@ static NSString *SRSessionReport(void)
          "INPUT LATENCY: %.6f\n"
          "OUTPUT LATENCY: %.6f\n"
          "INJECTION AVAILABLE: %@\n"
-         "PREFERRED INJECTION MODE: %ld\n"
+         "PREFERRED INJECTION MODE: %@\n"
          "INJECTION PERMISSION: %@",
 
         SRCategory(session),
+
         SRMode(session),
 
         session.isInputAvailable
@@ -99,22 +141,31 @@ static NSString *SRSessionReport(void)
         (long)session.inputNumberOfChannels,
 
         session.sampleRate,
+
         session.inputLatency,
+
         session.outputLatency,
 
         session.isMicrophoneInjectionAvailable
             ? @"YES"
             : @"NO",
 
-        (long)session.preferredMicrophoneInjectionMode,
+        SRInjectionModeName(
+            session.preferredMicrophoneInjectionMode
+        ),
 
-        SRPermission()];
+        SRPermission()
+    ];
 }
 
-static UIWindow *SRKeyWindow(void)
-{
-    for (UIScene *scene in
-         [UIApplication sharedApplication].connectedScenes) {
+#pragma mark - Key Window
+
+static UIWindow *SRKeyWindow(void) {
+
+    UIApplication *application =
+        [UIApplication sharedApplication];
+
+    for (UIScene *scene in application.connectedScenes) {
 
         if (![scene isKindOfClass:[UIWindowScene class]]) {
             continue;
@@ -134,51 +185,147 @@ static UIWindow *SRKeyWindow(void)
     return nil;
 }
 
-static void SRPopup(NSString *title,
-                    NSString *message)
-{
-    dispatch_async(dispatch_get_main_queue(), ^{
+#pragma mark - Popup
 
-        UIWindow *window =
-            SRKeyWindow();
+static void SRPopup(
+    NSString *title,
+    NSString *message
+) {
 
-        if (!window) {
-            SRLogLine(@"POPUP FAILED: NO KEY WINDOW");
-            return;
+    dispatch_async(
+        dispatch_get_main_queue(),
+        ^{
+
+            UIWindow *window = SRKeyWindow();
+
+            if (!window) {
+                SRLogLine(@"POPUP FAILED: NO KEY WINDOW");
+                return;
+            }
+
+            UIViewController *controller =
+                window.rootViewController;
+
+            while (controller.presentedViewController) {
+
+                controller =
+                    controller.presentedViewController;
+            }
+
+            UIAlertController *alert =
+                [UIAlertController
+                    alertControllerWithTitle:title
+                    message:message
+                    preferredStyle:UIAlertControllerStyleAlert];
+
+            [alert addAction:
+                [UIAlertAction
+                    actionWithTitle:@"OK"
+                    style:UIAlertActionStyleDefault
+                    handler:nil]];
+
+            [controller
+                presentViewController:alert
+                animated:YES
+                completion:nil];
         }
-
-        UIViewController *controller =
-            window.rootViewController;
-
-        while (controller.presentedViewController) {
-            controller =
-                controller.presentedViewController;
-        }
-
-        UIAlertController *alert =
-            [UIAlertController
-                alertControllerWithTitle:title
-                message:message
-                preferredStyle:UIAlertControllerStyleAlert];
-
-        [alert addAction:
-            [UIAlertAction
-                actionWithTitle:@"OK"
-                style:UIAlertActionStyleDefault
-                handler:nil]];
-
-        [controller
-            presentViewController:alert
-            animated:YES
-            completion:nil];
-    });
+    );
 }
 
-static void SRInjectionCapabilityChanged(
-    NSNotification *notification)
-{
-    AVAudioSession *session =
-        [AVAudioSession sharedInstance];
+#pragma mark - Permission Request
+
+static void SRRequestInjectionPermission(void) {
+
+    if (@available(iOS 18.2, *)) {
+
+        AVAudioApplication *application =
+            [AVAudioApplication sharedInstance];
+
+        AVAudioApplicationMicrophoneInjectionPermission permission =
+            application.microphoneInjectionPermission;
+
+        SRLogLine(
+            [NSString stringWithFormat:
+                @"CURRENT INJECTION PERMISSION: %@",
+                SRPermission()]
+        );
+
+        if (permission ==
+            AVAudioApplicationMicrophoneInjectionPermissionUndetermined) {
+
+            SRLogLine(
+                @"REQUESTING MICROPHONE INJECTION PERMISSION"
+            );
+
+            [application
+                requestMicrophoneInjectionPermissionWithCompletionHandler:
+                ^(BOOL granted) {
+
+                    dispatch_async(
+                        dispatch_get_main_queue(),
+                        ^{
+
+                            SRLogLine(
+                                [NSString stringWithFormat:
+                                    @"PERMISSION CALLBACK: %@",
+                                    granted
+                                        ? @"GRANTED"
+                                        : @"DENIED"]
+                            );
+
+                            SRLogLine(
+                                [NSString stringWithFormat:
+                                    @"POST-PERMISSION STATE:\n%@",
+                                    SRSessionReport()]
+                            );
+
+                            if (!SRPermissionPopupShown) {
+
+                                SRPermissionPopupShown = YES;
+
+                                SRPopup(
+                                    @"SanneRealtime\nPERMISSION RESULT",
+
+                                    [NSString stringWithFormat:
+                                        @"Microphone injection permission:\n\n"
+                                         "%@\n\n"
+                                         "Injection capability: %@\n\n"
+                                         "Category: %@\n"
+                                         "Mode: %@\n"
+                                         "Input channels: %ld\n\n"
+                                         "NO AUDIO WAS GENERATED.",
+
+                                        SRPermission(),
+
+                                        [SRSession()
+                                            isMicrophoneInjectionAvailable]
+                                            ? @"YES"
+                                            : @"NO",
+
+                                        SRCategory(SRSession()),
+
+                                        SRMode(SRSession()),
+
+                                        (long)[SRSession()
+                                            inputNumberOfChannels]
+                                    ]
+                                );
+                            }
+                        }
+                    );
+                }
+            ];
+        }
+    }
+}
+
+#pragma mark - Capability Change
+
+static void SRHandleInjectionCapabilityChange(
+    NSNotification *notification
+) {
+
+    AVAudioSession *session = SRSession();
 
     BOOL available =
         session.isMicrophoneInjectionAvailable;
@@ -193,125 +340,160 @@ static void SRInjectionCapabilityChanged(
     }
 
     SRLogLine(@"========================================");
-    SRLogLine(@"MICROPHONE INJECTION CAPABILITY CHANGED");
+    SRLogLine(@"MICROPHONE INJECTION CAPABILITY EVENT");
     SRLogLine(@"========================================");
 
     SRLogLine(
         [NSString stringWithFormat:
+            @"NOTIFICATION REPORTED: %@",
+            reported
+                ? (reported.boolValue ? @"YES" : @"NO")
+                : @"<none>"]
+    );
+
+    SRLogLine(
+        [NSString stringWithFormat:
             @"INJECTION AVAILABLE: %@",
-            available ? @"YES" : @"NO"]);
+            available ? @"YES" : @"NO"]
+    );
 
     SRLogLine(
         [NSString stringWithFormat:
             @"PERMISSION: %@",
-            SRPermission()]);
+            SRPermission()]
+    );
 
     SRLogLine(
         [NSString stringWithFormat:
             @"CATEGORY: %@",
-            SRCategory(session)]);
+            SRCategory(session)]
+    );
 
     SRLogLine(
         [NSString stringWithFormat:
             @"MODE: %@",
-            SRMode(session)]);
+            SRMode(session)]
+    );
 
     SRLogLine(
         [NSString stringWithFormat:
             @"INPUT AVAILABLE: %@",
             session.isInputAvailable
                 ? @"YES"
-                : @"NO"]);
+                : @"NO"]
+    );
 
     SRLogLine(
         [NSString stringWithFormat:
             @"INPUT CHANNELS: %ld",
-            (long)session.inputNumberOfChannels]);
+            (long)session.inputNumberOfChannels]
+    );
 
     SRLogLine(
         [NSString stringWithFormat:
             @"SAMPLE RATE: %.2f",
-            session.sampleRate]);
+            session.sampleRate]
+    );
 
     SRLogLine(
         [NSString stringWithFormat:
-            @"PREFERRED INJECTION MODE: %ld",
-            (long)session.preferredMicrophoneInjectionMode]);
+            @"PREFERRED INJECTION MODE: %@",
+            SRInjectionModeName(
+                session.preferredMicrophoneInjectionMode
+            )]
+    );
 
-    if (!available) {
+    if (available) {
 
-        SRLogLine(
-            @"INJECTION CAPABILITY: NO");
+        SRLogLine(@"*** REAL INJECTION CAPABILITY DETECTED ***");
 
-        return;
-    }
+        if (@available(iOS 18.2, *)) {
 
-    SRLogLine(
-        @"*** REAL INJECTION CAPABILITY DETECTED ***");
+            NSError *error = nil;
 
-    if (@available(iOS 18.2, *)) {
+            BOOL success =
+                [session
+                    setPreferredMicrophoneInjectionMode:
+                        AVAudioSessionMicrophoneInjectionModeSpokenAudio
+                    error:&error];
 
-        NSError *error = nil;
+            if (success) {
 
-        BOOL success =
-            [session
-                setPreferredMicrophoneInjectionMode:
-                    AVAudioSessionMicrophoneInjectionModeSpokenAudio
-                error:&error];
+                SRLogLine(
+                    @"SPOKEN AUDIO MODE SET SUCCESSFULLY"
+                );
 
-        if (success) {
+                SRLogLine(
+                    [NSString stringWithFormat:
+                        @"AFTER MODE SET:\n%@",
+                        SRSessionReport()]
+                );
 
-            SRLogLine(
-                @"SPOKEN AUDIO MODE: SET SUCCESSFULLY");
+                if (!SRCapabilityPopupShown) {
 
-            SRPopup(
-                @"SanneRealtime\nINJECTION AVAILABLE",
+                    SRCapabilityPopupShown = YES;
 
-                [NSString stringWithFormat:
-                    @"iOS exposed microphone injection.\n\n"
-                     "Permission: %@\n\n"
-                     "SpokenAudio: SUCCESS\n\n"
-                     "Category: %@\n"
-                     "Mode: %@\n"
-                     "Input channels: %ld\n"
-                     "Sample rate: %.0f\n\n"
-                     "NO AUDIO WAS GENERATED.",
+                    SRPopup(
+                        @"SanneRealtime\nINJECTION AVAILABLE",
 
-                    SRPermission(),
-                    SRCategory(session),
-                    SRMode(session),
-                    (long)session.inputNumberOfChannels,
-                    session.sampleRate]);
+                        [NSString stringWithFormat:
+                            @"Apple reports microphone injection AVAILABLE.\n\n"
+                             "SpokenAudio mode: SUCCESS\n\n"
+                             "Permission: %@\n"
+                             "Category: %@\n"
+                             "Mode: %@\n"
+                             "Input channels: %ld\n"
+                             "Sample rate: %.0f\n\n"
+                             "NO TEST AUDIO WAS GENERATED.",
+
+                            SRPermission(),
+
+                            SRCategory(session),
+
+                            SRMode(session),
+
+                            (long)session.inputNumberOfChannels,
+
+                            session.sampleRate]
+                    );
+                }
+
+            } else {
+
+                SRLogLine(
+                    [NSString stringWithFormat:
+                        @"SPOKEN AUDIO MODE FAILED: %@",
+                        error]
+                );
+
+                SRPopup(
+                    @"SanneRealtime\nMODE FAILED",
+
+                    [NSString stringWithFormat:
+                        @"Injection capability: YES\n\n"
+                         "Permission: %@\n\n"
+                         "SpokenAudio mode could not be selected.\n\n"
+                         "ERROR:\n%@",
+
+                        SRPermission(),
+                        error]
+                );
+            }
         }
-        else {
 
-            SRLogLine(
-                [NSString stringWithFormat:
-                    @"SPOKEN AUDIO MODE: FAILED\nERROR: %@",
-                    error.localizedDescription
-                        ?: @"Unknown error"]);
+    } else {
 
-            SRPopup(
-                @"SanneRealtime\nINJECTION AVAILABLE",
-
-                [NSString stringWithFormat:
-                    @"iOS reports injection AVAILABLE.\n\n"
-                     "SpokenAudio failed.\n\n"
-                     "Permission: %@\n\n"
-                     "ERROR:\n%@",
-
-                    SRPermission(),
-                    error.localizedDescription
-                        ?: @"Unknown error"]);
-        }
+        SRLogLine(@"INJECTION CAPABILITY: NO");
     }
 }
 
-static void SRRouteChanged(
-    NSNotification *notification)
-{
-    AVAudioSession *session =
-        [AVAudioSession sharedInstance];
+#pragma mark - Route Change
+
+static void SRHandleRouteChange(
+    NSNotification *notification
+) {
+
+    AVAudioSession *session = SRSession();
 
     NSNumber *reason =
         notification.userInfo[
@@ -326,265 +508,460 @@ static void SRRouteChanged(
         SRLogLine(
             [NSString stringWithFormat:
                 @"ROUTE CHANGE REASON: %ld",
-                (long)reason.integerValue]);
+                (long)reason.integerValue]
+        );
     }
 
     SRLogLine(
         [NSString stringWithFormat:
             @"CATEGORY: %@",
-            SRCategory(session)]);
+            SRCategory(session)]
+    );
 
     SRLogLine(
         [NSString stringWithFormat:
             @"MODE: %@",
-            SRMode(session)]);
+            SRMode(session)]
+    );
 
     SRLogLine(
         [NSString stringWithFormat:
             @"INPUT AVAILABLE: %@",
             session.isInputAvailable
                 ? @"YES"
-                : @"NO"]);
+                : @"NO"]
+    );
 
     SRLogLine(
         [NSString stringWithFormat:
             @"INPUT CHANNELS: %ld",
-            (long)session.inputNumberOfChannels]);
+            (long)session.inputNumberOfChannels]
+    );
 
     SRLogLine(
         [NSString stringWithFormat:
             @"SAMPLE RATE: %.2f",
-            session.sampleRate]);
+            session.sampleRate]
+    );
 
     SRLogLine(
         [NSString stringWithFormat:
             @"INJECTION AVAILABLE: %@",
             session.isMicrophoneInjectionAvailable
                 ? @"YES"
-                : @"NO"]);
-
-    SRLogLine(
-        [NSString stringWithFormat:
-            @"PERMISSION: %@",
-            SRPermission()]);
+                : @"NO"]
+    );
 
     SRLogLine(@"----------------------------------------");
 }
 
-static void SRInstallObservers(void)
-{
+#pragma mark - Interruption
+
+static void SRHandleInterruption(
+    NSNotification *notification
+) {
+
+    NSNumber *type =
+        notification.userInfo[
+            AVAudioSessionInterruptionTypeKey
+        ];
+
+    SRLogLine(@"========================================");
+    SRLogLine(@"AUDIO INTERRUPTION EVENT");
+
+    if (type) {
+
+        if (type.integerValue ==
+            AVAudioSessionInterruptionTypeBegan) {
+
+            SRLogLine(@"INTERRUPTION: BEGAN");
+
+        } else if (
+            type.integerValue ==
+            AVAudioSessionInterruptionTypeEnded
+        ) {
+
+            SRLogLine(@"INTERRUPTION: ENDED");
+
+        } else {
+
+            SRLogLine(
+                [NSString stringWithFormat:
+                    @"INTERRUPTION TYPE: %ld",
+                    (long)type.integerValue]
+            );
+        }
+    }
+
+    SRLogLine(
+        [NSString stringWithFormat:
+            @"CURRENT STATE:\n%@",
+            SRSessionReport()]
+    );
+
+    SRLogLine(@"========================================");
+}
+
+#pragma mark - App Lifecycle
+
+static void SRAppDidBecomeActive(
+    NSNotification *notification
+) {
+
+    AVAudioSession *session = SRSession();
+
+    SRLogLine(@"========================================");
+    SRLogLine(@"APPLICATION DID BECOME ACTIVE");
+
+    SRLogLine(
+        [NSString stringWithFormat:
+            @"PERMISSION: %@",
+            SRPermission()]
+    );
+
+    SRLogLine(
+        [NSString stringWithFormat:
+            @"INJECTION AVAILABLE: %@",
+            session.isMicrophoneInjectionAvailable
+                ? @"YES"
+                : @"NO"]
+    );
+
+    SRLogLine(
+        [NSString stringWithFormat:
+            @"CATEGORY: %@",
+            SRCategory(session)]
+    );
+
+    SRLogLine(
+        [NSString stringWithFormat:
+            @"MODE: %@",
+            SRMode(session)]
+    );
+
+    SRLogLine(
+        [NSString stringWithFormat:
+            @"INPUT CHANNELS: %ld",
+            (long)session.inputNumberOfChannels]
+    );
+
+    SRLogLine(@"========================================");
+}
+
+static void SRAppWillResignActive(
+    NSNotification *notification
+) {
+
+    SRLogLine(@"========================================");
+    SRLogLine(@"APPLICATION WILL RESIGN ACTIVE");
+    SRLogLine(
+        [NSString stringWithFormat:
+            @"STATE:\n%@",
+            SRSessionReport()]
+    );
+    SRLogLine(@"========================================");
+}
+
+#pragma mark - Audio Session State Notifications
+
+static void SRHandleMediaServicesReset(
+    NSNotification *notification
+) {
+
+    SRLogLine(@"MEDIA SERVICES RESET");
+
+    SRLogLine(
+        [NSString stringWithFormat:
+            @"STATE AFTER RESET:\n%@",
+            SRSessionReport()]
+    );
+}
+
+#pragma mark - Observers
+
+static void SRInstallObservers(void) {
+
+    if (SRObserversInstalled) {
+        return;
+    }
+
+    SRObserversInstalled = YES;
+
     NSNotificationCenter *center =
         [NSNotificationCenter defaultCenter];
+
+    /*
+     Apple's documented microphone-injection capability event.
+    */
 
     [center
         addObserverForName:
             AVAudioSessionMicrophoneInjectionCapabilitiesChangeNotification
         object:nil
         queue:[NSOperationQueue mainQueue]
-        usingBlock:^(NSNotification *notification) {
+        usingBlock:
+        ^(NSNotification *notification) {
 
-            SRInjectionCapabilityChanged(notification);
+            SRHandleInjectionCapabilityChange(
+                notification
+            );
         }];
+
+    SRLogLine(
+        @"INSTALLED: MICROPHONE INJECTION CAPABILITY OBSERVER"
+    );
+
+    /*
+     Route changes.
+    */
 
     [center
         addObserverForName:
             AVAudioSessionRouteChangeNotification
         object:nil
         queue:[NSOperationQueue mainQueue]
-        usingBlock:^(NSNotification *notification) {
+        usingBlock:
+        ^(NSNotification *notification) {
 
-            SRRouteChanged(notification);
+            SRHandleRouteChange(notification);
         }];
 
     SRLogLine(
-        @"MICROPHONE INJECTION CAPABILITY OBSERVER INSTALLED");
+        @"INSTALLED: AUDIO ROUTE OBSERVER"
+    );
 
-    SRLogLine(
-        @"AUDIO ROUTE OBSERVER INSTALLED");
-}
+    /*
+     Interruptions.
+    */
 
-static void SRRequestInjectionPermission(void)
-{
-    if (!@available(iOS 18.2, *)) {
+    [center
+        addObserverForName:
+            AVAudioSessionInterruptionNotification
+        object:nil
+        queue:[NSOperationQueue mainQueue]
+        usingBlock:
+        ^(NSNotification *notification) {
 
-        SRPopup(
-            @"SanneRealtime\nUNAVAILABLE",
-            @"Microphone injection requires iOS 18.2 or newer.");
-
-        return;
-    }
-
-    AVAudioApplication *application =
-        [AVAudioApplication sharedInstance];
-
-    AVAudioApplicationMicrophoneInjectionPermission current =
-        application.microphoneInjectionPermission;
-
-    SRLogLine(
-        [NSString stringWithFormat:
-            @"CURRENT INJECTION PERMISSION: %@",
-            SRPermission()]);
-
-    if (current !=
-        AVAudioApplicationMicrophoneInjectionPermissionUndetermined) {
-
-        SRLogLine(
-            @"INJECTION PERMISSION ALREADY DETERMINED");
-
-        SRPopup(
-            @"SanneRealtime\nPERMISSION STATUS",
-
-            [NSString stringWithFormat:
-                @"Injection permission: %@\n\n"
-                 "Injection capability: %@\n\n"
-                 "No audio was generated.",
-
-                SRPermission(),
-
-                [AVAudioSession sharedInstance]
-                    .isMicrophoneInjectionAvailable
-                    ? @"YES"
-                    : @"NO"]);
-
-        return;
-    }
-
-    SRLogLine(
-        @"REQUESTING MICROPHONE INJECTION PERMISSION");
-
-    [AVAudioApplication
-        requestMicrophoneInjectionPermissionWithCompletionHandler:
-        ^(AVAudioApplicationMicrophoneInjectionPermission permission) {
-
-            dispatch_async(
-                dispatch_get_main_queue(),
-                ^{
-
-                    NSString *result =
-                        @"UNKNOWN";
-
-                    switch (permission) {
-
-                        case AVAudioApplicationMicrophoneInjectionPermissionGranted:
-                            result = @"GRANTED";
-                            break;
-
-                        case AVAudioApplicationMicrophoneInjectionPermissionDenied:
-                            result = @"DENIED";
-                            break;
-
-                        case AVAudioApplicationMicrophoneInjectionPermissionUndetermined:
-                            result = @"UNDETERMINED";
-                            break;
-
-                        case AVAudioApplicationMicrophoneInjectionPermissionServiceDisabled:
-                            result = @"SERVICE_DISABLED";
-                            break;
-                    }
-
-                    AVAudioSession *session =
-                        [AVAudioSession sharedInstance];
-
-                    SRLogLine(
-                        [NSString stringWithFormat:
-                            @"INJECTION PERMISSION RESULT: %@",
-                            result]);
-
-                    SRLogLine(
-                        [NSString stringWithFormat:
-                            @"POST-PERMISSION INJECTION AVAILABLE: %@",
-                            session.isMicrophoneInjectionAvailable
-                                ? @"YES"
-                                : @"NO"]);
-
-                    SRPopup(
-                        @"SanneRealtime\nPERMISSION RESULT",
-
-                        [NSString stringWithFormat:
-                            @"Microphone injection permission:\n\n%@\n\n"
-                             "Injection capability: %@\n\n"
-                             "Category: %@\n"
-                             "Mode: %@\n"
-                             "Input channels: %ld\n\n"
-                             "NO AUDIO WAS GENERATED.",
-
-                            result,
-
-                            session.isMicrophoneInjectionAvailable
-                                ? @"YES"
-                                : @"NO",
-
-                            SRCategory(session),
-
-                            SRMode(session),
-
-                            (long)session.inputNumberOfChannels]);
-                });
+            SRHandleInterruption(notification);
         }];
+
+    SRLogLine(
+        @"INSTALLED: AUDIO INTERRUPTION OBSERVER"
+    );
+
+    /*
+     UIApplication lifecycle notifications.
+
+     We deliberately do NOT use:
+       AVAudioSessionDidBecomeActiveNotification
+       AVAudioSessionDidBecomeInactiveNotification
+
+     Those symbols are not available in your SDK.
+    */
+
+    [center
+        addObserverForName:
+            UIApplicationDidBecomeActiveNotification
+        object:nil
+        queue:[NSOperationQueue mainQueue]
+        usingBlock:
+        ^(NSNotification *notification) {
+
+            SRAppDidBecomeActive(notification);
+        }];
+
+    SRLogLine(
+        @"INSTALLED: APPLICATION ACTIVE OBSERVER"
+    );
+
+    [center
+        addObserverForName:
+            UIApplicationWillResignActiveNotification
+        object:nil
+        queue:[NSOperationQueue mainQueue]
+        usingBlock:
+        ^(NSNotification *notification) {
+
+            SRAppWillResignActive(notification);
+        }];
+
+    SRLogLine(
+        @"INSTALLED: APPLICATION RESIGN-ACTIVE OBSERVER"
+    );
+
+    /*
+     Media-server reset.
+    */
+
+    [center
+        addObserverForName:
+            AVAudioSessionMediaServicesWereResetNotification
+        object:nil
+        queue:[NSOperationQueue mainQueue]
+        usingBlock:
+        ^(NSNotification *notification) {
+
+            SRHandleMediaServicesReset(notification);
+        }];
+
+    SRLogLine(
+        @"INSTALLED: MEDIA SERVICES RESET OBSERVER"
+    );
 }
 
-static void SRInitialState(void)
-{
-    AVAudioSession *session =
-        [AVAudioSession sharedInstance];
+#pragma mark - Initial Probe
+
+static void SRInitialProbe(void) {
+
+    AVAudioSession *session = SRSession();
 
     SRLogLine(@"========================================");
-    SRLogLine(@"SANNE REALTIME - PERMISSION PROBE");
+    SRLogLine(@"SANNE REALTIME - CAPABILITY PROBE");
     SRLogLine(@"========================================");
 
+    SRLogLine(@"PASSIVE MODE");
     SRLogLine(@"ZERO AUDIO GENERATION");
     SRLogLine(@"ZERO AUDIO PLAYBACK");
     SRLogLine(@"ZERO AVAUDIOENGINE");
     SRLogLine(@"ZERO MICROPHONE TAP");
-    SRLogLine(@"ZERO AUDIO SESSION ACTIVATION");
+    SRLogLine(@"ZERO SESSION ACTIVATION");
+    SRLogLine(@"ZERO TEST VOICE");
+
+    SRLogLine(@"----------------------------------------");
 
     SRLogLine(
         [NSString stringWithFormat:
             @"INJECTION PERMISSION: %@",
-            SRPermission()]);
+            SRPermission()]
+    );
 
     SRLogLine(
         [NSString stringWithFormat:
             @"INJECTION AVAILABLE: %@",
             session.isMicrophoneInjectionAvailable
                 ? @"YES"
-                : @"NO"]);
+                : @"NO"]
+    );
+
+    SRLogLine(
+        [NSString stringWithFormat:
+            @"PREFERRED INJECTION MODE: %@",
+            SRInjectionModeName(
+                session.preferredMicrophoneInjectionMode
+            )]
+    );
 
     SRLogLine(
         [NSString stringWithFormat:
             @"CATEGORY: %@",
-            SRCategory(session)]);
+            SRCategory(session)]
+    );
 
     SRLogLine(
         [NSString stringWithFormat:
             @"MODE: %@",
-            SRMode(session)]);
+            SRMode(session)]
+    );
 
     SRLogLine(
         [NSString stringWithFormat:
             @"INPUT AVAILABLE: %@",
             session.isInputAvailable
                 ? @"YES"
-                : @"NO"]);
+                : @"NO"]
+    );
 
     SRLogLine(
         [NSString stringWithFormat:
             @"INPUT CHANNELS: %ld",
-            (long)session.inputNumberOfChannels]);
+            (long)session.inputNumberOfChannels]
+    );
 
     SRLogLine(
         [NSString stringWithFormat:
             @"SAMPLE RATE: %.2f",
-            session.sampleRate]);
+            session.sampleRate]
+    );
+
+    SRLogLine(@"----------------------------------------");
+
+    SRLogLine(
+        [NSString stringWithFormat:
+            @"FULL INITIAL STATE:\n%@",
+            SRSessionReport()]
+    );
+
+    SRLogLine(@"========================================");
 }
 
+#pragma mark - Final Popup
+
+static void SRShowReadyPopup(void) {
+
+    AVAudioSession *session = SRSession();
+
+    NSString *permission =
+        SRPermission();
+
+    NSString *available =
+        session.isMicrophoneInjectionAvailable
+            ? @"YES"
+            : @"NO";
+
+    NSString *message =
+        [NSString stringWithFormat:
+
+            @"Permission: %@\n\n"
+             "Current injection: %@\n\n"
+             "Category: %@\n"
+             "Mode: %@\n"
+             "Input channels: %ld\n"
+             "Sample rate: %.0f\n\n"
+             "The probe is PASSIVE.\n"
+             "No test voice.\n"
+             "No AVAudioEngine.\n"
+             "No microphone tap.\n"
+             "No audio generated.\n\n"
+             "Waiting for Apple's injection capability event.",
+
+            permission,
+
+            available,
+
+            SRCategory(session),
+
+            SRMode(session),
+
+            (long)session.inputNumberOfChannels,
+
+            session.sampleRate
+        ];
+
+    SRPopup(
+        @"SanneRealtime\nCAPABILITY PROBE READY",
+        message
+    );
+}
+
+#pragma mark - Constructor
+
 __attribute__((constructor))
-static void SanneRealtimeInit(void)
-{
+static void SanneRealtimeInit(void) {
+
     @autoreleasepool {
 
         SRLog =
             [NSMutableArray array];
+
+        SRLogLine(
+            @"SANNE REALTIME INITIALIZING"
+        );
+
+        /*
+         Install observers immediately.
+
+         We do not activate the audio session.
+        */
 
         SRInstallObservers();
 
@@ -592,29 +969,37 @@ static void SanneRealtimeInit(void)
             dispatch_get_main_queue(),
             ^{
 
-                SRInitialState();
+                SRInitialProbe();
 
-                AVAudioSession *session =
-                    [AVAudioSession sharedInstance];
+                /*
+                 Only request permission if still
+                 undetermined.
 
-                SRPopup(
-                    @"SanneRealtime\nPERMISSION PROBE READY",
+                 If already granted, nothing is requested.
+                */
 
-                    [NSString stringWithFormat:
-                        @"Permission: %@\n\n"
-                         "Current injection: %@\n\n"
-                         "Requesting Apple's injection permission now.\n\n"
-                         "No test voice.\n"
-                         "No AVAudioEngine.\n"
-                         "No microphone tap.",
+                if (@available(iOS 18.2, *)) {
 
-                        SRPermission(),
+                    if ([SRPermission()
+                        isEqualToString:@"UNDETERMINED"]) {
 
-                        session.isMicrophoneInjectionAvailable
-                            ? @"YES"
-                            : @"NO"]);
+                        SRRequestInjectionPermission();
 
-                SRRequestInjectionPermission();
-            });
+                    } else {
+
+                        SRShowReadyPopup();
+                    }
+
+                } else {
+
+                    SRPopup(
+                        @"SanneRealtime\nUNSUPPORTED",
+
+                        @"Microphone injection APIs require "
+                         "iOS 18.2 or later."
+                    );
+                }
+            }
+        );
     }
 }
