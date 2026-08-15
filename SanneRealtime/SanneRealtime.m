@@ -3,9 +3,12 @@
 #import <AVFAudio/AVFAudio.h>
 
 static NSMutableArray<NSString *> *SRLog = nil;
+
 static UIWindow *SROverlayWindow = nil;
 static UILabel *SRLabel = nil;
 static NSTimer *SRRefreshTimer = nil;
+
+#pragma mark - Logging
 
 static NSString *SRNow(void)
 {
@@ -24,9 +27,10 @@ static void SRLogLine(NSString *text)
     }
 
     NSString *line =
-        [NSString stringWithFormat:@"[%@] %@",
-         SRNow(),
-         text];
+        [NSString stringWithFormat:
+            @"[%@] %@",
+            SRNow(),
+            text];
 
     [SRLog addObject:line];
 
@@ -36,39 +40,39 @@ static void SRLogLine(NSString *text)
 
     NSLog(@"[SanneRealtime] %@", line);
 
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (SRLabel) {
-            NSString *latest = @"";
+    dispatch_async(
+        dispatch_get_main_queue(),
+        ^{
+
+            if (!SRLabel) {
+                return;
+            }
 
             NSUInteger start =
                 SRLog.count > 13
                 ? SRLog.count - 13
                 : 0;
 
-            if (SRLog.count > start) {
-                NSArray<NSString *> *lines =
-                    [SRLog subarrayWithRange:
-                        NSMakeRange(start,
-                                    SRLog.count - start)];
+            NSArray<NSString *> *lines =
+                [SRLog subarrayWithRange:
+                    NSMakeRange(
+                        start,
+                        SRLog.count - start)];
 
-                latest =
-                    [lines componentsJoinedByString:@"\n"];
-            }
-
-            SRLabel.text = latest;
-        }
-    });
+            SRLabel.text =
+                [lines componentsJoinedByString:@"\n"];
+        });
 }
+
+#pragma mark - Permission
 
 static NSString *SRPermission(void)
 {
     if (@available(iOS 18.2, *)) {
 
-        AVAudioApplication *application =
-            [AVAudioApplication sharedInstance];
-
         AVAudioApplicationMicrophoneInjectionPermission permission =
-            application.microphoneInjectionPermission;
+            [AVAudioApplication sharedInstance]
+                .microphoneInjectionPermission;
 
         switch (permission) {
 
@@ -89,6 +93,108 @@ static NSString *SRPermission(void)
     return @"UNAVAILABLE";
 }
 
+static void SRRequestInjectionPermission(void)
+{
+    if (@available(iOS 18.2, *)) {
+
+        NSString *before =
+            SRPermission();
+
+        SRLogLine(
+            [NSString stringWithFormat:
+                @"INJECTION PERMISSION BEFORE:%@",
+                before]);
+
+        if (![before isEqualToString:@"UNDETERMINED"]) {
+
+            SRLogLine(
+                @"PERMISSION ALREADY RESOLVED");
+
+            return;
+        }
+
+        SRLogLine(
+            @"REQUESTING MICROPHONE INJECTION PERMISSION");
+
+        /*
+         IMPORTANT:
+
+         This is Apple's documented permission request.
+
+         We do NOT:
+         - activate AVAudioSession
+         - create AVAudioEngine
+         - create a microphone tap
+         - generate audio
+         - inject audio
+
+         This only asks iOS for permission.
+        */
+
+        [AVAudioApplication
+            requestMicrophoneInjectionPermissionWithCompletionHandler:
+            ^(AVAudioApplicationMicrophoneInjectionPermission permission) {
+
+                NSString *result;
+
+                switch (permission) {
+
+                    case AVAudioApplicationMicrophoneInjectionPermissionGranted:
+                        result = @"GRANTED";
+                        break;
+
+                    case AVAudioApplicationMicrophoneInjectionPermissionDenied:
+                        result = @"DENIED";
+                        break;
+
+                    case AVAudioApplicationMicrophoneInjectionPermissionUndetermined:
+                        result = @"UNDETERMINED";
+                        break;
+
+                    case AVAudioApplicationMicrophoneInjectionPermissionServiceDisabled:
+                        result = @"SERVICE_DISABLED";
+                        break;
+                }
+
+                SRLogLine(
+                    [NSString stringWithFormat:
+                        @"PERMISSION RESULT:%@",
+                        result]);
+
+                dispatch_async(
+                    dispatch_get_main_queue(),
+                    ^{
+
+                        SRUpdateOverlay();
+
+                        /*
+                         Do not activate or alter the audio
+                         session here.
+                        */
+                    });
+            }];
+    }
+    else {
+
+        SRLogLine(
+            @"MICROPHONE INJECTION REQUIRES iOS 18.2+");
+    }
+}
+
+#pragma mark - Audio Diagnostics
+
+static NSString *SRCategory(
+    AVAudioSession *session)
+{
+    return session.category ?: @"<none>";
+}
+
+static NSString *SRMode(
+    AVAudioSession *session)
+{
+    return session.mode ?: @"<none>";
+}
+
 static NSString *SRInjectionState(void)
 {
     if (@available(iOS 18.2, *)) {
@@ -104,74 +210,7 @@ static NSString *SRInjectionState(void)
     return @"UNAVAILABLE";
 }
 
-static NSString *SRRouteReason(
-    AVAudioSessionRouteChangeReason reason)
-{
-    switch (reason) {
-
-        case AVAudioSessionRouteChangeReasonUnknown:
-            return @"UNKNOWN";
-
-        case AVAudioSessionRouteChangeReasonNewDeviceAvailable:
-            return @"NEW_DEVICE_AVAILABLE";
-
-        case AVAudioSessionRouteChangeReasonOldDeviceUnavailable:
-            return @"OLD_DEVICE_UNAVAILABLE";
-
-        case AVAudioSessionRouteChangeReasonCategoryChange:
-            return @"CATEGORY_CHANGE";
-
-        case AVAudioSessionRouteChangeReasonOverride:
-            return @"OVERRIDE";
-
-        case AVAudioSessionRouteChangeReasonWakeFromSleep:
-            return @"WAKE_FROM_SLEEP";
-
-        case AVAudioSessionRouteChangeReasonNoSuitableRouteForCategory:
-            return @"NO_SUITABLE_ROUTE";
-
-        case AVAudioSessionRouteChangeReasonRouteConfigurationChange:
-            return @"ROUTE_CONFIGURATION_CHANGE";
-
-        default:
-            return [NSString stringWithFormat:
-                @"UNKNOWN_%ld",
-                (long)reason];
-    }
-}
-
-static NSString *SRPortDescription(
-    AVAudioSessionPortDescription *port)
-{
-    if (!port) {
-        return @"NONE";
-    }
-
-    NSString *name =
-        port.portName ?: @"?";
-
-    NSString *type =
-        port.portType ?: @"?";
-
-    return [NSString stringWithFormat:
-        @"%@/%@",
-        name,
-        type];
-}
-
-static NSString *SRCategory(
-    AVAudioSession *session)
-{
-    return session.category ?: @"<none>";
-}
-
-static NSString *SRMode(
-    AVAudioSession *session)
-{
-    return session.mode ?: @"<none>";
-}
-
-static NSString *SRCurrentRoute(void)
+static NSString *SRRoute(void)
 {
     AVAudioSession *session =
         [AVAudioSession sharedInstance];
@@ -188,34 +227,103 @@ static NSString *SRCurrentRoute(void)
     for (AVAudioSessionPortDescription *port
          in route.inputs) {
 
+        NSString *name =
+            port.portName ?: @"?";
+
+        NSString *type =
+            port.portType ?: @"?";
+
         [inputs addObject:
-            SRPortDescription(port)];
+            [NSString stringWithFormat:
+                @"%@/%@",
+                name,
+                type]];
     }
 
     for (AVAudioSessionPortDescription *port
          in route.outputs) {
 
+        NSString *name =
+            port.portName ?: @"?";
+
+        NSString *type =
+            port.portType ?: @"?";
+
         [outputs addObject:
-            SRPortDescription(port)];
+            [NSString stringWithFormat:
+                @"%@/%@",
+                name,
+                type]];
     }
 
-    NSString *inputText =
+    NSString *input =
         inputs.count
         ? [inputs componentsJoinedByString:@","]
         : @"NONE";
 
-    NSString *outputText =
+    NSString *output =
         outputs.count
         ? [outputs componentsJoinedByString:@","]
         : @"NONE";
 
     return [NSString stringWithFormat:
         @"IN:%@ OUT:%@",
-        inputText,
-        outputText];
+        input,
+        output];
 }
 
-static UIWindowScene *SRActiveWindowScene(void)
+static void SRLogSession(
+    NSString *reason)
+{
+    AVAudioSession *session =
+        [AVAudioSession sharedInstance];
+
+    SRLogLine(
+        [NSString stringWithFormat:
+            @"SESSION:%@",
+            reason]);
+
+    SRLogLine(
+        [NSString stringWithFormat:
+            @"CAT:%@",
+            SRCategory(session)]);
+
+    SRLogLine(
+        [NSString stringWithFormat:
+            @"MODE:%@",
+            SRMode(session)]);
+
+    SRLogLine(
+        [NSString stringWithFormat:
+            @"INPUT:%@",
+            session.isInputAvailable
+                ? @"YES"
+                : @"NO"]);
+
+    SRLogLine(
+        [NSString stringWithFormat:
+            @"CHANNELS:%ld",
+            (long)session.inputNumberOfChannels]);
+
+    SRLogLine(
+        [NSString stringWithFormat:
+            @"SAMPLE RATE:%.0f",
+            session.sampleRate]);
+
+    SRLogLine(
+        [NSString stringWithFormat:
+            @"INJECTION:%@",
+            SRInjectionState()]);
+
+    SRLogLine(
+        [NSString stringWithFormat:
+            @"ROUTE:%@",
+            SRRoute()]);
+}
+
+#pragma mark - Overlay
+
+static UIWindowScene *SRActiveScene(void)
 {
     UIApplication *application =
         [UIApplication sharedApplication];
@@ -261,198 +369,165 @@ static UIWindowScene *SRActiveWindowScene(void)
 
 static void SRUpdateOverlay(void);
 
-static void SRCreateOverlayWindow(void)
+static void SRCreateOverlay(void)
 {
-    dispatch_async(dispatch_get_main_queue(), ^{
+    dispatch_async(
+        dispatch_get_main_queue(),
+        ^{
 
-        UIWindowScene *scene =
-            SRActiveWindowScene();
+            UIWindowScene *scene =
+                SRActiveScene();
 
-        if (!scene) {
+            if (!scene) {
+                return;
+            }
+
+            if (SROverlayWindow &&
+                SROverlayWindow.windowScene == scene &&
+                !SROverlayWindow.hidden) {
+
+                SRUpdateOverlay();
+                return;
+            }
+
+            if (SROverlayWindow) {
+
+                SROverlayWindow.hidden =
+                    YES;
+
+                SROverlayWindow =
+                    nil;
+
+                SRLabel =
+                    nil;
+            }
+
+            SROverlayWindow =
+                [[UIWindow alloc]
+                    initWithWindowScene:scene];
+
+            SROverlayWindow.frame =
+                scene.coordinateSpace.bounds;
+
+            SROverlayWindow.backgroundColor =
+                UIColor.clearColor;
+
+            /*
+             Never become key window.
+             Never consume touches.
+            */
+
+            SROverlayWindow.userInteractionEnabled =
+                NO;
+
+            SROverlayWindow.windowLevel =
+                UIWindowLevelNormal + 1.0;
+
+            SROverlayWindow.hidden =
+                NO;
+
+            UIViewController *controller =
+                [[UIViewController alloc] init];
+
+            controller.view.backgroundColor =
+                UIColor.clearColor;
+
+            controller.view.userInteractionEnabled =
+                NO;
+
+            SROverlayWindow.rootViewController =
+                controller;
+
+            UIView *panel =
+                [[UIView alloc]
+                    initWithFrame:
+                        CGRectMake(
+                            18.0,
+                            60.0,
+                            370.0,
+                            350.0)];
+
+            panel.backgroundColor =
+                [UIColor colorWithWhite:0.0
+                                  alpha:0.88];
+
+            panel.layer.cornerRadius =
+                15.0;
+
+            panel.clipsToBounds =
+                YES;
+
+            panel.userInteractionEnabled =
+                NO;
+
+            [controller.view addSubview:panel];
+
+            SRLabel =
+                [[UILabel alloc]
+                    initWithFrame:
+                        CGRectMake(
+                            12.0,
+                            10.0,
+                            346.0,
+                            330.0)];
+
+            SRLabel.textColor =
+                UIColor.whiteColor;
+
+            SRLabel.backgroundColor =
+                UIColor.clearColor;
+
+            SRLabel.font =
+                [UIFont
+                    monospacedSystemFontOfSize:
+                        11.0
+                    weight:UIFontWeightRegular];
+
+            SRLabel.numberOfLines =
+                0;
+
+            SRLabel.userInteractionEnabled =
+                NO;
+
+            [panel addSubview:SRLabel];
+
             SRLogLine(
-                @"OVERLAY: NO ACTIVE WINDOW SCENE");
-            return;
-        }
-
-        if (SROverlayWindow &&
-            SROverlayWindow.windowScene == scene &&
-            !SROverlayWindow.hidden) {
+                @"INDEPENDENT OVERLAY CREATED");
 
             SRUpdateOverlay();
-            return;
-        }
-
-        if (SROverlayWindow) {
-            SROverlayWindow.hidden = YES;
-            SROverlayWindow =
-                nil;
-        }
-
-        SROverlayWindow =
-            [[UIWindow alloc]
-                initWithWindowScene:scene];
-
-        SROverlayWindow.frame =
-            scene.coordinateSpace.bounds;
-
-        SROverlayWindow.backgroundColor =
-            UIColor.clearColor;
-
-        /*
-         Never become the key window.
-         Never receive touch events.
-        */
-        SROverlayWindow.userInteractionEnabled =
-            NO;
-
-        SROverlayWindow.hidden =
-            NO;
-
-        /*
-         Keep it above normal application content,
-         but below the system alert level.
-        */
-        SROverlayWindow.windowLevel =
-            UIWindowLevelNormal + 1.0;
-
-        UIViewController *controller =
-            [[UIViewController alloc] init];
-
-        controller.view.backgroundColor =
-            UIColor.clearColor;
-
-        controller.view.userInteractionEnabled =
-            NO;
-
-        SROverlayWindow.rootViewController =
-            controller;
-
-        UIView *panel =
-            [[UIView alloc]
-                initWithFrame:
-                    CGRectMake(
-                        8.0,
-                        60.0,
-                        350.0,
-                        330.0)];
-
-        panel.backgroundColor =
-            [UIColor colorWithWhite:0.0
-                              alpha:0.88];
-
-        panel.layer.cornerRadius =
-            14.0;
-
-        panel.clipsToBounds =
-            YES;
-
-        panel.userInteractionEnabled =
-            NO;
-
-        [controller.view addSubview:panel];
-
-        SRLabel =
-            [[UILabel alloc]
-                initWithFrame:
-                    CGRectMake(
-                        10.0,
-                        8.0,
-                        330.0,
-                        314.0)];
-
-        SRLabel.textColor =
-            UIColor.whiteColor;
-
-        SRLabel.backgroundColor =
-            UIColor.clearColor;
-
-        SRLabel.font =
-            [UIFont monospacedSystemFontOfSize:
-                11.0
-                weight:UIFontWeightRegular];
-
-        SRLabel.numberOfLines =
-            0;
-
-        SRLabel.lineBreakMode =
-            NSLineBreakByClipping;
-
-        SRLabel.adjustsFontSizeToFitWidth =
-            NO;
-
-        SRLabel.userInteractionEnabled =
-            NO;
-
-        [panel addSubview:SRLabel];
-
-        SROverlayWindow.hidden =
-            NO;
-
-        SRLogLine(
-            @"INDEPENDENT OVERLAY CREATED");
-
-        SRUpdateOverlay();
-    });
+        });
 }
 
 static void SRUpdateOverlay(void)
 {
-    dispatch_async(dispatch_get_main_queue(), ^{
+    dispatch_async(
+        dispatch_get_main_queue(),
+        ^{
 
-        if (!SROverlayWindow ||
-            !SRLabel) {
+            if (!SROverlayWindow ||
+                !SRLabel) {
 
-            return;
-        }
+                return;
+            }
 
-        UIWindowScene *scene =
-            SRActiveWindowScene();
+            AVAudioSession *session =
+                [AVAudioSession sharedInstance];
 
-        if (!scene) {
-            return;
-        }
+            UIApplicationState state =
+                [UIApplication sharedApplication]
+                    .applicationState;
 
-        if (SROverlayWindow.windowScene != scene) {
+            NSString *appState =
+                state == UIApplicationStateActive
+                ? @"ACTIVE"
+                : state == UIApplicationStateInactive
+                    ? @"INACTIVE"
+                    : @"BACKGROUND";
 
-            SRLogLine(
-                @"SCENE CHANGED - REBUILDING OVERLAY");
-
-            SROverlayWindow.hidden =
-                YES;
-
-            SROverlayWindow =
-                nil;
-
-            SRLabel =
-                nil;
-
-            SRCreateOverlayWindow();
-
-            return;
-        }
-
-        AVAudioSession *session =
-            [AVAudioSession sharedInstance];
-
-        UIApplicationState appState =
-            [UIApplication sharedApplication]
-                .applicationState;
-
-        NSString *state =
-            appState == UIApplicationStateActive
-            ? @"ACTIVE"
-            : appState == UIApplicationStateInactive
-                ? @"INACTIVE"
-                : @"BACKGROUND";
-
-        NSString *events = @"";
-
-        NSUInteger start =
-            SRLog.count > 12
-            ? SRLog.count - 12
-            : 0;
-
-        if (SRLog.count > start) {
+            NSUInteger start =
+                SRLog.count > 13
+                ? SRLog.count - 13
+                : 0;
 
             NSArray<NSString *> *lines =
                 [SRLog subarrayWithRange:
@@ -460,97 +535,63 @@ static void SRUpdateOverlay(void)
                         start,
                         SRLog.count - start)];
 
-            events =
+            NSString *events =
                 [lines componentsJoinedByString:@"\n"];
-        }
 
-        NSString *header =
-            [NSString stringWithFormat:
-                @"SANNE REALTIME\n"
-                 "P:%@  INJ:%@\n"
-                 "CAT:%@\n"
-                 "MODE:%@\n"
-                 "INPUT:%@  CH:%ld\n"
-                 "RATE:%.0f\n"
-                 "ROUTE:%@\n"
-                 "APP:%@\n"
-                 "------------------------------\n",
-                SRPermission(),
-                SRInjectionState(),
-                SRCategory(session),
-                SRMode(session),
-                session.isInputAvailable
-                    ? @"YES"
-                    : @"NO",
-                (long)session.inputNumberOfChannels,
-                session.sampleRate,
-                SRCurrentRoute(),
-                state];
+            NSString *header =
+                [NSString stringWithFormat:
+                    @"SANNE REALTIME\n"
+                     "P:%@  INJ:%@\n"
+                     "CAT:%@\n"
+                     "MODE:%@\n"
+                     "INPUT:%@ CH:%ld\n"
+                     "RATE:%.0f\n"
+                     "ROUTE:%@\n"
+                     "APP:%@\n"
+                     "------------------------------\n",
+                    SRPermission(),
+                    SRInjectionState(),
+                    SRCategory(session),
+                    SRMode(session),
+                    session.isInputAvailable
+                        ? @"YES"
+                        : @"NO",
+                    (long)session.inputNumberOfChannels,
+                    session.sampleRate,
+                    SRRoute(),
+                    appState];
 
-        SRLabel.text =
-            [header stringByAppendingString:
-                events];
+            SRLabel.text =
+                [header stringByAppendingString:
+                    events];
 
-        SROverlayWindow.hidden =
-            NO;
-    });
+            SROverlayWindow.hidden =
+                NO;
+        });
 }
 
-static void SRLogSessionState(
-    NSString *reason)
-{
-    AVAudioSession *session =
-        [AVAudioSession sharedInstance];
-
-    SRLogLine(
-        [NSString stringWithFormat:
-            @"SESSION:%@ CAT:%@ MODE:%@ INPUT:%@ CH:%ld SR:%.0f ROUTE:%@",
-            reason,
-            SRCategory(session),
-            SRMode(session),
-            session.isInputAvailable
-                ? @"YES"
-                : @"NO",
-            (long)session.inputNumberOfChannels,
-            session.sampleRate,
-            SRCurrentRoute()]);
-}
+#pragma mark - Notifications
 
 static void SRRouteChanged(
     NSNotification *notification)
 {
-    NSNumber *reasonNumber =
+    NSNumber *reason =
         notification.userInfo[
             AVAudioSessionRouteChangeReasonKey];
-
-    AVAudioSessionRouteChangeReason reason =
-        reasonNumber
-        ? reasonNumber.unsignedIntegerValue
-        : AVAudioSessionRouteChangeReasonUnknown;
 
     SRLogLine(
         [NSString stringWithFormat:
             @"ROUTE CHANGE:%ld",
-            (long)reason]);
-
-    SRLogLine(
-        [NSString stringWithFormat:
-            @"ROUTE REASON:%@",
-            SRRouteReason(reason)]);
-
-    if (notification.userInfo[
-            AVAudioSessionRouteChangePreviousRouteKey]) {
-
-        SRLogLine(
-            @"PREVIOUS ROUTE OBJECT PRESENT");
-    }
+            reason
+                ? (long)reason.unsignedIntegerValue
+                : -1]);
 
     SRLogLine(
         [NSString stringWithFormat:
             @"ROUTE:%@",
-            SRCurrentRoute()]);
+            SRRoute()]);
 
-    SRLogSessionState(
+    SRLogSession(
         @"AFTER_ROUTE_CHANGE");
 
     SRUpdateOverlay();
@@ -559,16 +600,12 @@ static void SRRouteChanged(
 static void SRInterruption(
     NSNotification *notification)
 {
-    NSNumber *typeNumber =
+    NSNumber *type =
         notification.userInfo[
             AVAudioSessionInterruptionTypeKey];
 
-    AVAudioSessionInterruptionType type =
-        typeNumber
-        ? typeNumber.unsignedIntegerValue
-        : AVAudioSessionInterruptionTypeBegan;
-
-    if (type ==
+    if (type &&
+        type.unsignedIntegerValue ==
         AVAudioSessionInterruptionTypeBegan) {
 
         SRLogLine(
@@ -578,104 +615,61 @@ static void SRInterruption(
 
         SRLogLine(
             @"INTERRUPTION:ENDED");
-
-        NSNumber *options =
-            notification.userInfo[
-                AVAudioSessionInterruptionOptionKey];
-
-        if (options) {
-
-            SRLogLine(
-                [NSString stringWithFormat:
-                    @"INTERRUPTION OPTIONS:%lu",
-                    (unsigned long)
-                    options.unsignedIntegerValue]);
-        }
     }
 
-    SRLogSessionState(
+    SRLogSession(
         @"AFTER_INTERRUPTION");
 
     SRUpdateOverlay();
 }
 
-static void SRMediaServicesLost(
-    NSNotification *notification)
-{
-    SRLogLine(
-        @"MEDIA SERVICES:LOST");
-
-    SRLogSessionState(
-        @"MEDIA_SERVICES_LOST");
-
-    SRUpdateOverlay();
-}
-
-static void SRMediaServicesReset(
-    NSNotification *notification)
-{
-    SRLogLine(
-        @"MEDIA SERVICES:RESET");
-
-    SRLogSessionState(
-        @"MEDIA_SERVICES_RESET");
-
-    SRUpdateOverlay();
-}
-
-static void SRApplicationActive(
+static void SRAppActive(
     NSNotification *notification)
 {
     SRLogLine(
         @"APPLICATION:ACTIVE");
 
-    SRLogSessionState(
+    SRLogSession(
         @"APPLICATION_ACTIVE");
 
-    SRCreateOverlayWindow();
+    SRCreateOverlay();
 }
 
-static void SRApplicationInactive(
+static void SRAppInactive(
     NSNotification *notification)
 {
     SRLogLine(
         @"APPLICATION:INACTIVE");
 
-    SRLogSessionState(
+    SRLogSession(
         @"APPLICATION_INACTIVE");
 
     SRUpdateOverlay();
 }
 
-static void SRApplicationForeground(
+static void SRForeground(
     NSNotification *notification)
 {
     SRLogLine(
         @"APPLICATION:FOREGROUND");
 
-    SRLogSessionState(
-        @"APPLICATION_FOREGROUND");
-
-    SRCreateOverlayWindow();
+    SRCreateOverlay();
 }
 
-static void SRApplicationBackground(
+static void SRBackground(
     NSNotification *notification)
 {
     SRLogLine(
         @"APPLICATION:BACKGROUND");
 
-    SRLogSessionState(
-        @"APPLICATION_BACKGROUND");
-
     SRUpdateOverlay();
 }
 
-static void SRInjectionCapabilityChanged(
+static void SRInjectionChanged(
     NSNotification *notification)
 {
     SRLogLine(
-        @"INJECTION CAPABILITY EVENT");
+        @"INJECTION CAPABILITY CHANGED");
 
     SRLogLine(
         [NSString stringWithFormat:
@@ -687,41 +681,13 @@ static void SRInjectionCapabilityChanged(
             @"PERMISSION:%@",
             SRPermission()]);
 
-    SRLogSessionState(
-        @"INJECTION_CAPABILITY_EVENT");
+    SRLogSession(
+        @"INJECTION_EVENT");
 
     SRUpdateOverlay();
 }
 
-static void SRSilenceHint(
-    NSNotification *notification)
-{
-    NSNumber *type =
-        notification.userInfo[
-            AVAudioSessionSilenceSecondaryAudioHintTypeKey];
-
-    if (type) {
-
-        if (type.unsignedIntegerValue ==
-            AVAudioSessionSilenceSecondaryAudioHintTypeBegin) {
-
-            SRLogLine(
-                @"SECONDARY AUDIO SILENCE:BEGIN");
-
-        } else {
-
-            SRLogLine(
-                @"SECONDARY AUDIO SILENCE:END");
-        }
-
-    } else {
-
-        SRLogLine(
-            @"SECONDARY AUDIO SILENCE:HINT");
-    }
-
-    SRUpdateOverlay();
-}
+#pragma mark - Observer Installation
 
 static void SRInstallObservers(void)
 {
@@ -749,43 +715,13 @@ static void SRInstallObservers(void)
         }];
 
     [center addObserverForName:
-        AVAudioSessionMediaServicesWereLostNotification
-        object:nil
-        queue:[NSOperationQueue mainQueue]
-        usingBlock:
-        ^(NSNotification *notification) {
-
-            SRMediaServicesLost(notification);
-        }];
-
-    [center addObserverForName:
-        AVAudioSessionMediaServicesWereResetNotification
-        object:nil
-        queue:[NSOperationQueue mainQueue]
-        usingBlock:
-        ^(NSNotification *notification) {
-
-            SRMediaServicesReset(notification);
-        }];
-
-    [center addObserverForName:
-        AVAudioSessionSilenceSecondaryAudioHintNotification
-        object:nil
-        queue:[NSOperationQueue mainQueue]
-        usingBlock:
-        ^(NSNotification *notification) {
-
-            SRSilenceHint(notification);
-        }];
-
-    [center addObserverForName:
         UIApplicationDidBecomeActiveNotification
         object:nil
         queue:[NSOperationQueue mainQueue]
         usingBlock:
         ^(NSNotification *notification) {
 
-            SRApplicationActive(notification);
+            SRAppActive(notification);
         }];
 
     [center addObserverForName:
@@ -795,7 +731,7 @@ static void SRInstallObservers(void)
         usingBlock:
         ^(NSNotification *notification) {
 
-            SRApplicationInactive(notification);
+            SRAppInactive(notification);
         }];
 
     [center addObserverForName:
@@ -805,7 +741,7 @@ static void SRInstallObservers(void)
         usingBlock:
         ^(NSNotification *notification) {
 
-            SRApplicationForeground(notification);
+            SRForeground(notification);
         }];
 
     [center addObserverForName:
@@ -815,7 +751,7 @@ static void SRInstallObservers(void)
         usingBlock:
         ^(NSNotification *notification) {
 
-            SRApplicationBackground(notification);
+            SRBackground(notification);
         }];
 
     if (@available(iOS 18.2, *)) {
@@ -827,8 +763,7 @@ static void SRInstallObservers(void)
             usingBlock:
             ^(NSNotification *notification) {
 
-                SRInjectionCapabilityChanged(
-                    notification);
+                SRInjectionChanged(notification);
             }];
     }
 
@@ -836,7 +771,9 @@ static void SRInstallObservers(void)
         @"OBSERVERS INSTALLED");
 }
 
-static void SRInitialDiagnostic(void)
+#pragma mark - Initial State
+
+static void SRInitialState(void)
 {
     AVAudioSession *session =
         [AVAudioSession sharedInstance];
@@ -845,13 +782,10 @@ static void SRInitialDiagnostic(void)
         @"================================");
 
     SRLogLine(
-        @"SANNE REALTIME DIAGNOSTIC");
+        @"SANNE REALTIME - PERMISSION TEST");
 
     SRLogLine(
         @"================================");
-
-    SRLogLine(
-        @"PASSIVE AUDIO MODE");
 
     SRLogLine(
         @"NO AVAUDIOENGINE");
@@ -860,10 +794,10 @@ static void SRInitialDiagnostic(void)
         @"NO MICROPHONE TAP");
 
     SRLogLine(
-        @"NO SESSION ACTIVATION");
+        @"NO AUDIO GENERATION");
 
     SRLogLine(
-        @"NO AUDIO GENERATION");
+        @"NO SESSION ACTIVATION");
 
     SRLogLine(
         [NSString stringWithFormat:
@@ -875,40 +809,13 @@ static void SRInitialDiagnostic(void)
             @"INJECTION:%@",
             SRInjectionState()]);
 
-    SRLogLine(
-        [NSString stringWithFormat:
-            @"CATEGORY:%@",
-            SRCategory(session)]);
-
-    SRLogLine(
-        [NSString stringWithFormat:
-            @"MODE:%@",
-            SRMode(session)]);
-
-    SRLogLine(
-        [NSString stringWithFormat:
-            @"INPUT AVAILABLE:%@",
-            session.isInputAvailable
-                ? @"YES"
-                : @"NO"]);
-
-    SRLogLine(
-        [NSString stringWithFormat:
-            @"INPUT CHANNELS:%ld",
-            (long)session.inputNumberOfChannels]);
-
-    SRLogLine(
-        [NSString stringWithFormat:
-            @"SAMPLE RATE:%.0f",
-            session.sampleRate]);
-
-    SRLogLine(
-        [NSString stringWithFormat:
-            @"ROUTE:%@",
-            SRCurrentRoute()]);
+    SRLogSession(
+        @"INITIAL");
 }
 
-static void SRStartRefreshTimer(void)
+#pragma mark - Refresh
+
+static void SRStartTimer(void)
 {
     dispatch_async(
         dispatch_get_main_queue(),
@@ -916,7 +823,6 @@ static void SRStartRefreshTimer(void)
 
             if (SRRefreshTimer) {
                 [SRRefreshTimer invalidate];
-                SRRefreshTimer = nil;
             }
 
             SRRefreshTimer =
@@ -930,13 +836,15 @@ static void SRStartRefreshTimer(void)
                         if (!SROverlayWindow ||
                             SROverlayWindow.hidden) {
 
-                            SRCreateOverlayWindow();
+                            SRCreateOverlay();
                         }
 
                         SRUpdateOverlay();
                     }];
         });
 }
+
+#pragma mark - Constructor
 
 __attribute__((constructor))
 static void SanneRealtimeInit(void)
@@ -952,30 +860,30 @@ static void SanneRealtimeInit(void)
             dispatch_get_main_queue(),
             ^{
 
-                SRInitialDiagnostic();
+                SRInitialState();
 
-                SRCreateOverlayWindow();
+                SRCreateOverlay();
 
-                SRStartRefreshTimer();
+                SRStartTimer();
 
-                dispatch_after(
-                    dispatch_time(
-                        DISPATCH_TIME_NOW,
-                        1000 * NSEC_PER_MSEC),
-                    dispatch_get_main_queue(),
-                    ^{
-
-                        SRCreateOverlayWindow();
-                    });
+                /*
+                 Request permission after the UI exists,
+                 so the system dialog can appear normally.
+                */
 
                 dispatch_after(
                     dispatch_time(
                         DISPATCH_TIME_NOW,
-                        3000 * NSEC_PER_MSEC),
+                        1200 * NSEC_PER_MSEC),
                     dispatch_get_main_queue(),
                     ^{
 
-                        SRCreateOverlayWindow();
+                        SRLogLine(
+                            @"STARTING PERMISSION REQUEST");
+
+                        SRRequestInjectionPermission();
+
+                        SRUpdateOverlay();
                     });
             });
     }
