@@ -2,13 +2,31 @@
 #import <UIKit/UIKit.h>
 #import <AVFAudio/AVFAudio.h>
 
+#pragma mark ============================================================
+#pragma mark Forward Declarations
+#pragma mark ============================================================
+
+static void SRUpdateOverlay(void);
+static void SRCreateOverlay(void);
+static void SRStartTimer(void);
+static void SRRequestInjectionPermission(void);
+static void SRInitialState(void);
+static void SRInstallObservers(void);
+static void SRLogSession(NSString *reason);
+
+#pragma mark ============================================================
+#pragma mark Globals
+#pragma mark ============================================================
+
 static NSMutableArray<NSString *> *SRLog = nil;
 
 static UIWindow *SROverlayWindow = nil;
 static UILabel *SRLabel = nil;
 static NSTimer *SRRefreshTimer = nil;
 
-#pragma mark - Logging
+#pragma mark ============================================================
+#pragma mark Time / Logging
+#pragma mark ============================================================
 
 static NSString *SRNow(void)
 {
@@ -34,7 +52,7 @@ static void SRLogLine(NSString *text)
 
     [SRLog addObject:line];
 
-    if (SRLog.count > 120) {
+    if (SRLog.count > 150) {
         [SRLog removeObjectAtIndex:0];
     }
 
@@ -43,28 +61,13 @@ static void SRLogLine(NSString *text)
     dispatch_async(
         dispatch_get_main_queue(),
         ^{
-
-            if (!SRLabel) {
-                return;
-            }
-
-            NSUInteger start =
-                SRLog.count > 13
-                ? SRLog.count - 13
-                : 0;
-
-            NSArray<NSString *> *lines =
-                [SRLog subarrayWithRange:
-                    NSMakeRange(
-                        start,
-                        SRLog.count - start)];
-
-            SRLabel.text =
-                [lines componentsJoinedByString:@"\n"];
+            SRUpdateOverlay();
         });
 }
 
-#pragma mark - Permission
+#pragma mark ============================================================
+#pragma mark Permission
+#pragma mark ============================================================
 
 static NSString *SRPermission(void)
 {
@@ -97,15 +100,15 @@ static void SRRequestInjectionPermission(void)
 {
     if (@available(iOS 18.2, *)) {
 
-        NSString *before =
+        NSString *current =
             SRPermission();
 
         SRLogLine(
             [NSString stringWithFormat:
-                @"INJECTION PERMISSION BEFORE:%@",
-                before]);
+                @"PERMISSION BEFORE:%@",
+                current]);
 
-        if (![before isEqualToString:@"UNDETERMINED"]) {
+        if (![current isEqualToString:@"UNDETERMINED"]) {
 
             SRLogLine(
                 @"PERMISSION ALREADY RESOLVED");
@@ -117,25 +120,21 @@ static void SRRequestInjectionPermission(void)
             @"REQUESTING MICROPHONE INJECTION PERMISSION");
 
         /*
-         IMPORTANT:
+         Apple's documented class method.
 
-         This is Apple's documented permission request.
-
-         We do NOT:
-         - activate AVAudioSession
+         This does NOT:
+         - activate an audio session
          - create AVAudioEngine
          - create a microphone tap
          - generate audio
          - inject audio
-
-         This only asks iOS for permission.
         */
 
         [AVAudioApplication
             requestMicrophoneInjectionPermissionWithCompletionHandler:
             ^(AVAudioApplicationMicrophoneInjectionPermission permission) {
 
-                NSString *result;
+                NSString *result = @"UNKNOWN";
 
                 switch (permission) {
 
@@ -164,13 +163,7 @@ static void SRRequestInjectionPermission(void)
                 dispatch_async(
                     dispatch_get_main_queue(),
                     ^{
-
                         SRUpdateOverlay();
-
-                        /*
-                         Do not activate or alter the audio
-                         session here.
-                        */
                     });
             }];
     }
@@ -181,18 +174,28 @@ static void SRRequestInjectionPermission(void)
     }
 }
 
-#pragma mark - Audio Diagnostics
+#pragma mark ============================================================
+#pragma mark Audio State
+#pragma mark ============================================================
 
 static NSString *SRCategory(
     AVAudioSession *session)
 {
-    return session.category ?: @"<none>";
+    if (session.category) {
+        return session.category;
+    }
+
+    return @"<none>";
 }
 
 static NSString *SRMode(
     AVAudioSession *session)
 {
-    return session.mode ?: @"<none>";
+    if (session.mode) {
+        return session.mode;
+    }
+
+    return @"<none>";
 }
 
 static NSString *SRInjectionState(void)
@@ -209,6 +212,10 @@ static NSString *SRInjectionState(void)
 
     return @"UNAVAILABLE";
 }
+
+#pragma mark ============================================================
+#pragma mark Route
+#pragma mark ============================================================
 
 static NSString *SRRoute(void)
 {
@@ -258,19 +265,24 @@ static NSString *SRRoute(void)
 
     NSString *input =
         inputs.count
-        ? [inputs componentsJoinedByString:@","]
-        : @"NONE";
+            ? [inputs componentsJoinedByString:@","]
+            : @"NONE";
 
     NSString *output =
         outputs.count
-        ? [outputs componentsJoinedByString:@","]
-        : @"NONE";
+            ? [outputs componentsJoinedByString:@","]
+            : @"NONE";
 
-    return [NSString stringWithFormat:
-        @"IN:%@ OUT:%@",
-        input,
-        output];
+    return
+        [NSString stringWithFormat:
+            @"IN:%@ OUT:%@",
+            input,
+            output];
 }
+
+#pragma mark ============================================================
+#pragma mark Session Report
+#pragma mark ============================================================
 
 static void SRLogSession(
     NSString *reason)
@@ -285,7 +297,7 @@ static void SRLogSession(
 
     SRLogLine(
         [NSString stringWithFormat:
-            @"CAT:%@",
+            @"CATEGORY:%@",
             SRCategory(session)]);
 
     SRLogLine(
@@ -295,14 +307,14 @@ static void SRLogSession(
 
     SRLogLine(
         [NSString stringWithFormat:
-            @"INPUT:%@",
+            @"INPUT AVAILABLE:%@",
             session.isInputAvailable
                 ? @"YES"
                 : @"NO"]);
 
     SRLogLine(
         [NSString stringWithFormat:
-            @"CHANNELS:%ld",
+            @"INPUT CHANNELS:%ld",
             (long)session.inputNumberOfChannels]);
 
     SRLogLine(
@@ -321,7 +333,9 @@ static void SRLogSession(
             SRRoute()]);
 }
 
-#pragma mark - Overlay
+#pragma mark ============================================================
+#pragma mark Active Scene
+#pragma mark ============================================================
 
 static UIWindowScene *SRActiveScene(void)
 {
@@ -367,7 +381,9 @@ static UIWindowScene *SRActiveScene(void)
     return nil;
 }
 
-static void SRUpdateOverlay(void);
+#pragma mark ============================================================
+#pragma mark Overlay
+#pragma mark ============================================================
 
 static void SRCreateOverlay(void)
 {
@@ -387,6 +403,7 @@ static void SRCreateOverlay(void)
                 !SROverlayWindow.hidden) {
 
                 SRUpdateOverlay();
+
                 return;
             }
 
@@ -413,8 +430,9 @@ static void SRCreateOverlay(void)
                 UIColor.clearColor;
 
             /*
-             Never become key window.
-             Never consume touches.
+             Important:
+             This window never becomes key.
+             It doesn't receive touches.
             */
 
             SROverlayWindow.userInteractionEnabled =
@@ -422,9 +440,6 @@ static void SRCreateOverlay(void)
 
             SROverlayWindow.windowLevel =
                 UIWindowLevelNormal + 1.0;
-
-            SROverlayWindow.hidden =
-                NO;
 
             UIViewController *controller =
                 [[UIViewController alloc] init];
@@ -445,11 +460,12 @@ static void SRCreateOverlay(void)
                             18.0,
                             60.0,
                             370.0,
-                            350.0)];
+                            370.0)];
 
             panel.backgroundColor =
-                [UIColor colorWithWhite:0.0
-                                  alpha:0.88];
+                [UIColor
+                    colorWithWhite:0.0
+                    alpha:0.88];
 
             panel.layer.cornerRadius =
                 15.0;
@@ -460,7 +476,8 @@ static void SRCreateOverlay(void)
             panel.userInteractionEnabled =
                 NO;
 
-            [controller.view addSubview:panel];
+            [controller.view
+                addSubview:panel];
 
             SRLabel =
                 [[UILabel alloc]
@@ -469,7 +486,7 @@ static void SRCreateOverlay(void)
                             12.0,
                             10.0,
                             346.0,
-                            330.0)];
+                            350.0)];
 
             SRLabel.textColor =
                 UIColor.whiteColor;
@@ -486,10 +503,16 @@ static void SRCreateOverlay(void)
             SRLabel.numberOfLines =
                 0;
 
+            SRLabel.lineBreakMode =
+                NSLineBreakByClipping;
+
             SRLabel.userInteractionEnabled =
                 NO;
 
             [panel addSubview:SRLabel];
+
+            SROverlayWindow.hidden =
+                NO;
 
             SRLogLine(
                 @"INDEPENDENT OVERLAY CREATED");
@@ -497,6 +520,10 @@ static void SRCreateOverlay(void)
             SRUpdateOverlay();
         });
 }
+
+#pragma mark ============================================================
+#pragma mark Overlay Update
+#pragma mark ============================================================
 
 static void SRUpdateOverlay(void)
 {
@@ -517,26 +544,42 @@ static void SRUpdateOverlay(void)
                 [UIApplication sharedApplication]
                     .applicationState;
 
-            NSString *appState =
-                state == UIApplicationStateActive
-                ? @"ACTIVE"
-                : state == UIApplicationStateInactive
-                    ? @"INACTIVE"
-                    : @"BACKGROUND";
+            NSString *appState;
+
+            switch (state) {
+
+                case UIApplicationStateActive:
+                    appState = @"ACTIVE";
+                    break;
+
+                case UIApplicationStateInactive:
+                    appState = @"INACTIVE";
+                    break;
+
+                case UIApplicationStateBackground:
+                    appState = @"BACKGROUND";
+                    break;
+
+                default:
+                    appState = @"UNKNOWN";
+                    break;
+            }
 
             NSUInteger start =
-                SRLog.count > 13
-                ? SRLog.count - 13
-                : 0;
+                SRLog.count > 14
+                    ? SRLog.count - 14
+                    : 0;
 
             NSArray<NSString *> *lines =
-                [SRLog subarrayWithRange:
-                    NSMakeRange(
-                        start,
-                        SRLog.count - start)];
+                [SRLog
+                    subarrayWithRange:
+                        NSMakeRange(
+                            start,
+                            SRLog.count - start)];
 
             NSString *events =
-                [lines componentsJoinedByString:@"\n"];
+                [lines
+                    componentsJoinedByString:@"\n"];
 
             NSString *header =
                 [NSString stringWithFormat:
@@ -562,15 +605,18 @@ static void SRUpdateOverlay(void)
                     appState];
 
             SRLabel.text =
-                [header stringByAppendingString:
-                    events];
+                [header
+                    stringByAppendingString:
+                        events];
 
             SROverlayWindow.hidden =
                 NO;
         });
 }
 
-#pragma mark - Notifications
+#pragma mark ============================================================
+#pragma mark Route Notification
+#pragma mark ============================================================
 
 static void SRRouteChanged(
     NSNotification *notification)
@@ -597,6 +643,10 @@ static void SRRouteChanged(
     SRUpdateOverlay();
 }
 
+#pragma mark ============================================================
+#pragma mark Interruption Notification
+#pragma mark ============================================================
+
 static void SRInterruption(
     NSNotification *notification)
 {
@@ -606,7 +656,7 @@ static void SRInterruption(
 
     if (type &&
         type.unsignedIntegerValue ==
-        AVAudioSessionInterruptionTypeBegan) {
+            AVAudioSessionInterruptionTypeBegan) {
 
         SRLogLine(
             @"INTERRUPTION:BEGAN");
@@ -622,6 +672,10 @@ static void SRInterruption(
 
     SRUpdateOverlay();
 }
+
+#pragma mark ============================================================
+#pragma mark Application Notifications
+#pragma mark ============================================================
 
 static void SRAppActive(
     NSNotification *notification)
@@ -662,18 +716,44 @@ static void SRBackground(
     SRLogLine(
         @"APPLICATION:BACKGROUND");
 
+    SRLogLine(
+        @"APPLICATION ENTERED BACKGROUND");
+
     SRUpdateOverlay();
 }
+
+#pragma mark ============================================================
+#pragma mark Injection Capability Notification
+#pragma mark ============================================================
 
 static void SRInjectionChanged(
     NSNotification *notification)
 {
+    NSNumber *reported =
+        notification.userInfo[
+            AVAudioSessionMicrophoneInjectionIsAvailableKey];
+
+    NSString *reportedValue =
+        reported
+            ? (reported.boolValue
+                ? @"YES"
+                : @"NO")
+            : @"UNKNOWN";
+
+    SRLogLine(
+        @"================================");
+
     SRLogLine(
         @"INJECTION CAPABILITY CHANGED");
 
     SRLogLine(
         [NSString stringWithFormat:
-            @"INJECTION:%@",
+            @"NOTIFICATION VALUE:%@",
+            reportedValue]);
+
+    SRLogLine(
+        [NSString stringWithFormat:
+            @"CURRENT INJECTION:%@",
             SRInjectionState()]);
 
     SRLogLine(
@@ -687,67 +767,81 @@ static void SRInjectionChanged(
     SRUpdateOverlay();
 }
 
-#pragma mark - Observer Installation
+#pragma mark ============================================================
+#pragma mark Observer Installation
+#pragma mark ============================================================
 
 static void SRInstallObservers(void)
 {
     NSNotificationCenter *center =
         [NSNotificationCenter defaultCenter];
 
-    [center addObserverForName:
-        AVAudioSessionRouteChangeNotification
+    [center
+        addObserverForName:
+            AVAudioSessionRouteChangeNotification
         object:nil
-        queue:[NSOperationQueue mainQueue]
+        queue:
+            [NSOperationQueue mainQueue]
         usingBlock:
         ^(NSNotification *notification) {
 
             SRRouteChanged(notification);
         }];
 
-    [center addObserverForName:
-        AVAudioSessionInterruptionNotification
+    [center
+        addObserverForName:
+            AVAudioSessionInterruptionNotification
         object:nil
-        queue:[NSOperationQueue mainQueue]
+        queue:
+            [NSOperationQueue mainQueue]
         usingBlock:
         ^(NSNotification *notification) {
 
             SRInterruption(notification);
         }];
 
-    [center addObserverForName:
-        UIApplicationDidBecomeActiveNotification
+    [center
+        addObserverForName:
+            UIApplicationDidBecomeActiveNotification
         object:nil
-        queue:[NSOperationQueue mainQueue]
+        queue:
+            [NSOperationQueue mainQueue]
         usingBlock:
         ^(NSNotification *notification) {
 
             SRAppActive(notification);
         }];
 
-    [center addObserverForName:
-        UIApplicationWillResignActiveNotification
+    [center
+        addObserverForName:
+            UIApplicationWillResignActiveNotification
         object:nil
-        queue:[NSOperationQueue mainQueue]
+        queue:
+            [NSOperationQueue mainQueue]
         usingBlock:
         ^(NSNotification *notification) {
 
             SRAppInactive(notification);
         }];
 
-    [center addObserverForName:
-        UIApplicationWillEnterForegroundNotification
+    [center
+        addObserverForName:
+            UIApplicationWillEnterForegroundNotification
         object:nil
-        queue:[NSOperationQueue mainQueue]
+        queue:
+            [NSOperationQueue mainQueue]
         usingBlock:
         ^(NSNotification *notification) {
 
             SRForeground(notification);
         }];
 
-    [center addObserverForName:
-        UIApplicationDidEnterBackgroundNotification
+    [center
+        addObserverForName:
+            UIApplicationDidEnterBackgroundNotification
         object:nil
-        queue:[NSOperationQueue mainQueue]
+        queue:
+            [NSOperationQueue mainQueue]
         usingBlock:
         ^(NSNotification *notification) {
 
@@ -756,10 +850,12 @@ static void SRInstallObservers(void)
 
     if (@available(iOS 18.2, *)) {
 
-        [center addObserverForName:
-            AVAudioSessionMicrophoneInjectionCapabilitiesChangeNotification
+        [center
+            addObserverForName:
+                AVAudioSessionMicrophoneInjectionCapabilitiesChangeNotification
             object:nil
-            queue:[NSOperationQueue mainQueue]
+            queue:
+                [NSOperationQueue mainQueue]
             usingBlock:
             ^(NSNotification *notification) {
 
@@ -771,7 +867,9 @@ static void SRInstallObservers(void)
         @"OBSERVERS INSTALLED");
 }
 
-#pragma mark - Initial State
+#pragma mark ============================================================
+#pragma mark Initial Diagnostic
+#pragma mark ============================================================
 
 static void SRInitialState(void)
 {
@@ -782,19 +880,19 @@ static void SRInitialState(void)
         @"================================");
 
     SRLogLine(
-        @"SANNE REALTIME - PERMISSION TEST");
+        @"SANNE REALTIME - DIAGNOSTIC");
 
     SRLogLine(
         @"================================");
+
+    SRLogLine(
+        @"NO AUDIO GENERATION");
 
     SRLogLine(
         @"NO AVAUDIOENGINE");
 
     SRLogLine(
         @"NO MICROPHONE TAP");
-
-    SRLogLine(
-        @"NO AUDIO GENERATION");
 
     SRLogLine(
         @"NO SESSION ACTIVATION");
@@ -809,11 +907,42 @@ static void SRInitialState(void)
             @"INJECTION:%@",
             SRInjectionState()]);
 
-    SRLogSession(
-        @"INITIAL");
+    SRLogLine(
+        [NSString stringWithFormat:
+            @"CATEGORY:%@",
+            SRCategory(session)]);
+
+    SRLogLine(
+        [NSString stringWithFormat:
+            @"MODE:%@",
+            SRMode(session)]);
+
+    SRLogLine(
+        [NSString stringWithFormat:
+            @"INPUT AVAILABLE:%@",
+            session.isInputAvailable
+                ? @"YES"
+                : @"NO"]);
+
+    SRLogLine(
+        [NSString stringWithFormat:
+            @"INPUT CHANNELS:%ld",
+            (long)session.inputNumberOfChannels]);
+
+    SRLogLine(
+        [NSString stringWithFormat:
+            @"SAMPLE RATE:%.0f",
+            session.sampleRate]);
+
+    SRLogLine(
+        [NSString stringWithFormat:
+            @"ROUTE:%@",
+            SRRoute()]);
 }
 
-#pragma mark - Refresh
+#pragma mark ============================================================
+#pragma mark Timer
+#pragma mark ============================================================
 
 static void SRStartTimer(void)
 {
@@ -822,7 +951,11 @@ static void SRStartTimer(void)
         ^{
 
             if (SRRefreshTimer) {
+
                 [SRRefreshTimer invalidate];
+
+                SRRefreshTimer =
+                    nil;
             }
 
             SRRefreshTimer =
@@ -844,7 +977,9 @@ static void SRStartTimer(void)
         });
 }
 
-#pragma mark - Constructor
+#pragma mark ============================================================
+#pragma mark Constructor
+#pragma mark ============================================================
 
 __attribute__((constructor))
 static void SanneRealtimeInit(void)
@@ -867,8 +1002,8 @@ static void SanneRealtimeInit(void)
                 SRStartTimer();
 
                 /*
-                 Request permission after the UI exists,
-                 so the system dialog can appear normally.
+                 Give the host UI a moment to initialize
+                 before displaying Apple's permission dialog.
                 */
 
                 dispatch_after(
@@ -879,7 +1014,7 @@ static void SanneRealtimeInit(void)
                     ^{
 
                         SRLogLine(
-                            @"STARTING PERMISSION REQUEST");
+                            @"STARTING INJECTION PERMISSION REQUEST");
 
                         SRRequestInjectionPermission();
 
