@@ -1,525 +1,833 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
-#import <AVFoundation/AVFoundation.h>
+#import <AVFAudio/AVFAudio.h>
 
-static UIWindow *SRWindow = nil;
-static UITextView *SRTextView = nil;
-static NSTimer *SRTimer = nil;
+#pragma mark - Globals
 
-static NSMutableArray<NSString *> *SRLogLines = nil;
-static BOOL SRInstalled = NO;
+static AVSpeechSynthesizer *gSynth = nil;
+static AVAudioEngine *gEngine = nil;
 
-static BOOL SRLastInput = NO;
-static BOOL SRLastInjection = NO;
-static NSString *SRLastCategory = nil;
-static NSString *SRLastMode = nil;
-static NSInteger SRLastChannels = -1;
+static BOOL gCaptureRunning = NO;
+static BOOL gTestStarted = NO;
 
-#pragma mark - Logging
+static uint64_t gCapturedFrames = 0;
+static uint64_t gCallbackCount = 0;
 
-static NSString *SRNow(void)
+static float gPeak = 0.0f;
+static float gRMS = 0.0f;
+
+#pragma mark - Popup
+
+static UIWindow *SRKeyWindow(void)
 {
-    NSDateFormatter *f = [[NSDateFormatter alloc] init];
-    f.dateFormat = @"HH:mm:ss.SSS";
-    return [f stringFromDate:[NSDate date]];
-}
+    for (UIScene *scene
+         in [UIApplication sharedApplication].connectedScenes) {
 
-static void SRLog(NSString *format, ...)
-{
-    if (!SRLogLines) {
-        SRLogLines = [NSMutableArray array];
+        if (![scene isKindOfClass:[UIWindowScene class]]) {
+            continue;
+        }
+
+        UIWindowScene *windowScene =
+            (UIWindowScene *)scene;
+
+        if (windowScene.activationState !=
+            UISceneActivationStateForegroundActive) {
+            continue;
+        }
+
+        for (UIWindow *window in windowScene.windows) {
+
+            if (window.isKeyWindow) {
+                return window;
+            }
+        }
     }
 
-    va_list args;
-    va_start(args, format);
+    return nil;
+}
 
-    NSString *message =
-        [[NSString alloc] initWithFormat:format arguments:args];
-
-    va_end(args);
-
-    NSString *line =
-        [NSString stringWithFormat:@"[%@] %@",
-         SRNow(),
-         message];
-
+static void SRPopup(NSString *message)
+{
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!SRLogLines) {
-            SRLogLines = [NSMutableArray array];
+
+        UIWindow *window = SRKeyWindow();
+
+        if (!window) {
+            NSLog(@"[SanneRealtime] POPUP: %@", message);
+            return;
         }
 
-        [SRLogLines addObject:line];
+        UIViewController *controller =
+            window.rootViewController;
 
-        while (SRLogLines.count > 35) {
-            [SRLogLines removeObjectAtIndex:0];
+        while (controller.presentedViewController) {
+            controller =
+                controller.presentedViewController;
         }
+
+        UIAlertController *alert =
+            [UIAlertController
+                alertControllerWithTitle:@"SanneRealtime"
+                message:message
+                preferredStyle:UIAlertControllerStyleAlert];
+
+        [alert addAction:
+            [UIAlertAction
+                actionWithTitle:@"OK"
+                style:UIAlertActionStyleDefault
+                handler:nil]];
+
+        [controller
+            presentViewController:alert
+            animated:YES
+            completion:nil];
     });
 }
 
-#pragma mark - Audio information
+#pragma mark - Permission
 
-static NSString *SRRoute(void)
+static NSString *SRPermissionString(void)
 {
-    AVAudioSession *s =
+    if (@available(iOS 18.2, *)) {
+
+        AVAudioApplicationMicrophoneInjectionPermission permission =
+            [AVAudioApplication sharedInstance]
+                .microphoneInjectionPermission;
+
+        switch (permission) {
+
+            case AVAudioApplicationMicrophoneInjectionPermissionGranted:
+                return @"GRANTED";
+
+            case AVAudioApplicationMicrophoneInjectionPermissionDenied:
+                return @"DENIED";
+
+            case AVAudioApplicationMicrophoneInjectionPermissionUndetermined:
+                return @"UNDETERMINED";
+
+            case AVAudioApplicationMicrophoneInjectionPermissionServiceDisabled:
+                return @"SERVICE DISABLED";
+        }
+    }
+
+    return @"UNAVAILABLE";
+}
+
+#pragma mark - Voice
+
+static AVSpeechSynthesisVoice *SRFemaleVoice(void)
+{
+    NSArray<AVSpeechSynthesisVoice *> *voices =
+        [AVSpeechSynthesisVoice speechVoices];
+
+    for (AVSpeechSynthesisVoice *voice in voices) {
+
+        if (voice.gender ==
+            AVSpeechSynthesisVoiceGenderFemale) {
+
+            if ([voice.language hasPrefix:@"en"]) {
+                return voice;
+            }
+        }
+    }
+
+    return
+        [AVSpeechSynthesisVoice
+            voiceWithLanguage:@"en-US"];
+}
+
+static void SRSpeakKnownGoodTest(void)
+{
+    if (!gSynth) {
+        gSynth =
+            [[AVSpeechSynthesizer alloc] init];
+    }
+
+    AVSpeechSynthesisVoice *voice =
+        SRFemaleVoice();
+
+    AVSpeechUtterance *utterance =
+        [AVSpeechUtterance
+            speechUtteranceWithString:
+                @"SanneRealtime live microphone capture test."];
+
+    utterance.voice =
+        voice;
+
+    utterance.rate =
+        0.48;
+
+    utterance.pitchMultiplier =
+        1.05;
+
+    utterance.volume =
+        1.0;
+
+    NSLog(
+        @"[SanneRealtime] SPEAKING KNOWN-GOOD TEST");
+
+    [gSynth speakUtterance:utterance];
+}
+
+#pragma mark - Audio State
+
+static NSString *SRRouteDescription(void)
+{
+    AVAudioSession *session =
         [AVAudioSession sharedInstance];
 
     AVAudioSessionRouteDescription *route =
-        s.currentRoute;
+        session.currentRoute;
 
-    NSMutableArray *ins =
+    NSMutableArray *inputs =
         [NSMutableArray array];
 
-    NSMutableArray *outs =
+    NSMutableArray *outputs =
         [NSMutableArray array];
 
-    for (AVAudioSessionPortDescription *p in route.inputs) {
-        if (p.portName.length) {
-            [ins addObject:p.portName];
-        }
+    for (AVAudioSessionPortDescription *port
+         in route.inputs) {
+
+        [inputs addObject:
+            [NSString stringWithFormat:
+                @"%@/%@",
+                port.portName ?: @"?",
+                port.portType ?: @"?"]];
     }
 
-    for (AVAudioSessionPortDescription *p in route.outputs) {
-        if (p.portName.length) {
-            [outs addObject:p.portName];
-        }
+    for (AVAudioSessionPortDescription *port
+         in route.outputs) {
+
+        [outputs addObject:
+            [NSString stringWithFormat:
+                @"%@/%@",
+                port.portName ?: @"?",
+                port.portType ?: @"?"]];
     }
 
     NSString *input =
-        ins.count ?
-        [ins componentsJoinedByString:@"/"] :
-        @"NONE";
+        inputs.count
+        ? [inputs componentsJoinedByString:@","]
+        : @"NONE";
 
     NSString *output =
-        outs.count ?
-        [outs componentsJoinedByString:@"/"] :
-        @"NONE";
+        outputs.count
+        ? [outputs componentsJoinedByString:@","]
+        : @"NONE";
 
-    return [NSString stringWithFormat:
+    return
+        [NSString stringWithFormat:
             @"IN:%@ OUT:%@",
             input,
             output];
 }
 
-static BOOL SRInjectionAvailable(void)
+static NSString *SRSessionReport(void)
 {
-    AVAudioSession *s =
+    AVAudioSession *session =
         [AVAudioSession sharedInstance];
-
-    BOOL result = NO;
-
-    @try {
-        result = s.isMicrophoneInjectionAvailable;
-    }
-    @catch (__unused NSException *e) {
-        result = NO;
-    }
-
-    return result;
-}
-
-static void SRSnapshot(NSString *reason)
-{
-    AVAudioSession *s =
-        [AVAudioSession sharedInstance];
-
-    SRLog(@"SNAPSHOT:%@", reason);
-
-    SRLog(@"INPUT_AVAILABLE:%@",
-          s.isInputAvailable ? @"YES" : @"NO");
-
-    SRLog(@"INPUT_CHANNELS:%ld",
-          (long)s.inputNumberOfChannels);
-
-    SRLog(@"SAMPLE_RATE:%.0f",
-          s.sampleRate);
-
-    SRLog(@"INJECTION:%@",
-          SRInjectionAvailable() ? @"YES" : @"NO");
-
-    SRLog(@"CATEGORY:%@",
-          s.category ?: @"NONE");
-
-    SRLog(@"MODE:%@",
-          s.mode ?: @"NONE");
-
-    SRLog(@"ROUTE:%@",
-          SRRoute());
-
-    UIApplicationState state =
-        UIApplication.sharedApplication.applicationState;
-
-    NSString *stateText;
-
-    if (state == UIApplicationStateActive) {
-        stateText = @"ACTIVE";
-    }
-    else if (state == UIApplicationStateBackground) {
-        stateText = @"BACKGROUND";
-    }
-    else {
-        stateText = @"INACTIVE";
-    }
-
-    SRLog(@"APP_STATE:%@", stateText);
-
-    SRLog(@"------------------------------");
-}
-
-#pragma mark - Overlay update
-
-static void SRUpdateOverlay(void)
-{
-    if (!SRTextView) {
-        return;
-    }
-
-    AVAudioSession *s =
-        [AVAudioSession sharedInstance];
-
-    NSString *header =
-        [NSString stringWithFormat:
-         @"SANNE REALTIME — OBSERVER\n"
-         @"P:%@\n"
-         @"INJ:%@\n"
-         @"CAT:%@\n"
-         @"MODE:%@\n"
-         @"INPUT:%@\n"
-         @"CH:%ld\n"
-         @"RATE:%.0f\n"
-         @"ROUTE:%@\n"
-         @"------------------------------\n",
-         @"GRANTED",
-         SRInjectionAvailable() ? @"YES" : @"NO",
-         s.category ?: @"NONE",
-         s.mode ?: @"NONE",
-         s.isInputAvailable ? @"YES" : @"NO",
-         (long)s.inputNumberOfChannels,
-         s.sampleRate,
-         SRRoute()];
-
-    NSMutableString *text =
-        [NSMutableString stringWithString:header];
-
-    for (NSString *line in SRLogLines) {
-        [text appendString:line];
-        [text appendString:@"\n"];
-    }
-
-    SRTextView.text = text;
-}
-
-#pragma mark - Poll
-
-static void SRPoll(void)
-{
-    AVAudioSession *s =
-        [AVAudioSession sharedInstance];
-
-    BOOL input =
-        s.isInputAvailable;
 
     BOOL injection =
-        SRInjectionAvailable();
+        NO;
 
-    NSString *category =
-        s.category ?: @"NONE";
-
-    NSString *mode =
-        s.mode ?: @"NONE";
-
-    NSInteger channels =
-        s.inputNumberOfChannels;
-
-    if (input != SRLastInput) {
-
-        SRLastInput = input;
-
-        SRLog(@"OBSERVED INPUT:%@",
-              input ? @"YES" : @"NO");
-
-        SRSnapshot(@"INPUT_CHANGED");
+    if (@available(iOS 18.2, *)) {
+        injection =
+            session.isMicrophoneInjectionAvailable;
     }
 
-    if (injection != SRLastInjection) {
-
-        SRLastInjection = injection;
-
-        SRLog(@"OBSERVED INJECTION:%@",
-              injection ? @"YES" : @"NO");
-
-        SRSnapshot(@"INJECTION_CHANGED");
-    }
-
-    if (!SRLastCategory ||
-        ![SRLastCategory isEqualToString:category]) {
-
-        SRLastCategory =
-            [category copy];
-
-        SRLog(@"OBSERVED CATEGORY:%@",
-              category);
-
-        SRSnapshot(@"CATEGORY_CHANGED");
-    }
-
-    if (!SRLastMode ||
-        ![SRLastMode isEqualToString:mode]) {
-
-        SRLastMode =
-            [mode copy];
-
-        SRLog(@"OBSERVED MODE:%@",
-              mode);
-
-        SRSnapshot(@"MODE_CHANGED");
-    }
-
-    if (channels != SRLastChannels) {
-
-        SRLastChannels =
-            channels;
-
-        SRLog(@"OBSERVED CHANNELS:%ld",
-              (long)channels);
-
-        SRSnapshot(@"CHANNELS_CHANGED");
-    }
-
-    SRUpdateOverlay();
+    return
+        [NSString stringWithFormat:
+            @"PERMISSION: %@\n"
+             "INJECTION: %@\n"
+             "CATEGORY: %@\n"
+             "MODE: %@\n"
+             "INPUT AVAILABLE: %@\n"
+             "INPUT CHANNELS: %ld\n"
+             "SAMPLE RATE: %.0f\n"
+             "ROUTE: %@",
+            SRPermissionString(),
+            injection ? @"YES" : @"NO",
+            session.category ?: @"NONE",
+            session.mode ?: @"NONE",
+            session.isInputAvailable
+                ? @"YES"
+                : @"NO",
+            (long)session.inputNumberOfChannels,
+            session.sampleRate,
+            SRRouteDescription()];
 }
 
-#pragma mark - Application notifications
+#pragma mark - Capture Statistics
 
-static void SRAppActive(NSNotification *n)
+static void SRResetCaptureStats(void)
 {
-    (void)n;
-
-    SRLog(@"APPLICATION:ACTIVE");
-    SRSnapshot(@"APPLICATION_ACTIVE");
+    gCapturedFrames = 0;
+    gCallbackCount = 0;
+    gPeak = 0.0f;
+    gRMS = 0.0f;
 }
 
-static void SRAppInactive(NSNotification *n)
+static void SRProcessBuffer(
+    AVAudioPCMBuffer *buffer)
 {
-    (void)n;
-
-    SRLog(@"APPLICATION:INACTIVE");
-    SRSnapshot(@"APPLICATION_INACTIVE");
-}
-
-static void SRAppBackground(NSNotification *n)
-{
-    (void)n;
-
-    SRLog(@"APPLICATION:BACKGROUND");
-    SRSnapshot(@"APPLICATION_BACKGROUND");
-}
-
-static void SRAppForeground(NSNotification *n)
-{
-    (void)n;
-
-    SRLog(@"APPLICATION:FOREGROUND");
-    SRSnapshot(@"APPLICATION_FOREGROUND");
-}
-
-#pragma mark - Audio notifications
-
-static void SRRouteChanged(NSNotification *n)
-{
-    NSNumber *number =
-        n.userInfo[AVAudioSessionRouteChangeReasonKey];
-
-    NSInteger reason =
-        number ? number.integerValue : -1;
-
-    SRLog(@"ROUTE_CHANGED:REASON:%ld",
-          (long)reason);
-
-    SRSnapshot(@"ROUTE_CHANGE");
-}
-
-static void SRInterruption(NSNotification *n)
-{
-    NSNumber *number =
-        n.userInfo[AVAudioSessionInterruptionTypeKey];
-
-    NSInteger type =
-        number ? number.integerValue : -1;
-
-    if (type ==
-        AVAudioSessionInterruptionTypeBegan) {
-
-        SRLog(@"INTERRUPTION:BEGAN");
-    }
-    else if (type ==
-             AVAudioSessionInterruptionTypeEnded) {
-
-        SRLog(@"INTERRUPTION:ENDED");
-    }
-    else {
-
-        SRLog(@"INTERRUPTION:TYPE:%ld",
-              (long)type);
-    }
-
-    SRSnapshot(@"INTERRUPTION");
-}
-
-static void SRMediaReset(NSNotification *n)
-{
-    (void)n;
-
-    SRLog(@"MEDIA_SERVICES:RESET");
-    SRSnapshot(@"MEDIA_RESET");
-}
-
-static void SRMediaLost(NSNotification *n)
-{
-    (void)n;
-
-    SRLog(@"MEDIA_SERVICES:LOST");
-    SRSnapshot(@"MEDIA_LOST");
-}
-
-static void SRInjectionChanged(NSNotification *n)
-{
-    (void)n;
-
-    SRLog(@"INJECTION_CAPABILITY_CHANGED:%@",
-          SRInjectionAvailable() ? @"YES" : @"NO");
-
-    SRSnapshot(@"INJECTION_CAPABILITY");
-}
-
-#pragma mark - Overlay
-
-static void SRCreateOverlay(void)
-{
-    if (SRWindow) {
+    if (!buffer) {
         return;
     }
 
-    dispatch_async(dispatch_get_main_queue(), ^{
+    AVAudioFrameCount frames =
+        buffer.frameLength;
 
-        if (SRWindow) {
-            return;
+    if (frames == 0) {
+        return;
+    }
+
+    gCapturedFrames +=
+        frames;
+
+    gCallbackCount++;
+
+    AVAudioChannelCount channels =
+        buffer.format.channelCount;
+
+    if (channels == 0) {
+        return;
+    }
+
+    float localPeak =
+        0.0f;
+
+    double sumSquares =
+        0.0;
+
+    AVAudioFrameCount count =
+        frames;
+
+    if (buffer.floatChannelData) {
+
+        for (AVAudioChannelCount channel = 0;
+             channel < channels;
+             channel++) {
+
+            float *data =
+                buffer.floatChannelData[channel];
+
+            if (!data) {
+                continue;
+            }
+
+            for (AVAudioFrameCount frame = 0;
+                 frame < count;
+                 frame++) {
+
+                float value =
+                    data[frame];
+
+                float absolute =
+                    fabsf(value);
+
+                if (absolute > localPeak) {
+                    localPeak =
+                        absolute;
+                }
+
+                sumSquares +=
+                    (double)value *
+                    (double)value;
+            }
         }
 
-        UIScreen *screen =
-            [UIScreen mainScreen];
+        double sampleCount =
+            (double)count *
+            (double)channels;
 
-        CGRect screenBounds =
-            screen.bounds;
+        if (sampleCount > 0.0) {
 
-        CGFloat screenWidth =
-            screenBounds.size.width;
-
-        CGFloat screenHeight =
-            screenBounds.size.height;
-
-        CGFloat width =
-            screenWidth - 24.0;
-
-        if (width > 760.0) {
-            width = 760.0;
+            gRMS =
+                (float)sqrt(
+                    sumSquares /
+                    sampleCount);
         }
 
-        CGFloat height =
-            420.0;
+        if (localPeak > gPeak) {
+            gPeak =
+                localPeak;
+        }
+    }
+}
 
-        CGFloat x =
-            (screenWidth - width) / 2.0;
+#pragma mark - Start Capture
 
-        CGFloat y =
-            70.0;
+static void SRStartCapture(void)
+{
+    if (gCaptureRunning) {
+        NSLog(
+            @"[SanneRealtime] CAPTURE ALREADY RUNNING");
+        return;
+    }
 
-        SRWindow =
-            [[UIWindow alloc]
-             initWithFrame:
-             CGRectMake(x, y, width, height)];
+    AVAudioSession *session =
+        [AVAudioSession sharedInstance];
 
-        SRWindow.windowLevel =
-            UIWindowLevelAlert + 100.0;
+    NSLog(
+        @"[SanneRealtime] =======================");
 
-        SRWindow.backgroundColor =
-            [UIColor clearColor];
+    NSLog(
+        @"[SanneRealtime] START CAPTURE REQUEST");
 
-        SRWindow.hidden = NO;
+    NSLog(
+        @"[SanneRealtime] %@", SRSessionReport());
 
-        UIViewController *vc =
-            [[UIViewController alloc] init];
+    /*
+     IMPORTANT:
 
-        vc.view.backgroundColor =
-            [UIColor clearColor];
+     We do NOT call:
+       setCategory:
+       setMode:
+       setActive:
 
-        SRWindow.rootViewController =
-            vc;
+     Discord/Nobanny owns the active call session.
 
-        UIView *panel =
-            [[UIView alloc]
-             initWithFrame:
-             CGRectMake(0,
-                        0,
-                        width,
-                        height)];
+     We only attempt to read the already-active input.
+    */
 
-        panel.backgroundColor =
-            [UIColor colorWithWhite:0.02
-                              alpha:0.94];
+    if (!session.isInputAvailable) {
 
-        panel.layer.cornerRadius =
-            18.0;
+        SRPopup(
+            @"INPUT IS NOT AVAILABLE.\n\n"
+             "Make sure the Nobanny Discord call is "
+             "already connected before starting capture.");
 
-        panel.layer.masksToBounds =
+        return;
+    }
+
+    if (session.inputNumberOfChannels <= 0) {
+
+        SRPopup(
+            @"INPUT CHANNELS = 0.\n\n"
+             "The Discord call has not exposed a usable "
+             "microphone input yet.");
+
+        return;
+    }
+
+    gEngine =
+        [[AVAudioEngine alloc] init];
+
+    AVAudioInputNode *inputNode =
+        gEngine.inputNode;
+
+    if (!inputNode) {
+
+        gEngine =
+            nil;
+
+        SRPopup(
+            @"Could not obtain AVAudioEngine input node.");
+
+        return;
+    }
+
+    AVAudioFormat *format =
+        [inputNode inputFormatForBus:0];
+
+    if (!format) {
+
+        gEngine =
+            nil;
+
+        SRPopup(
+            @"Could not obtain microphone format.");
+
+        return;
+    }
+
+    NSLog(
+        @"[SanneRealtime] INPUT FORMAT: %@",
+        format);
+
+    if (format.channelCount == 0 ||
+        format.sampleRate <= 0.0) {
+
+        gEngine =
+            nil;
+
+        SRPopup(
+            [NSString stringWithFormat:
+                @"INVALID INPUT FORMAT.\n\n"
+                 "Channels: %u\n"
+                 "Sample rate: %.0f",
+                (unsigned)format.channelCount,
+                format.sampleRate]);
+
+        return;
+    }
+
+    SRResetCaptureStats();
+
+    /*
+     The tap only copies/inspects live PCM.
+     It does NOT modify the audio.
+    */
+
+    [inputNode
+        installTapOnBus:0
+        bufferSize:1024
+        format:format
+        block:^(AVAudioPCMBuffer *buffer,
+                AVAudioTime *when) {
+
+            (void)when;
+
+            SRProcessBuffer(buffer);
+        }];
+
+    NSError *engineError =
+        nil;
+
+    BOOL prepared =
+        [gEngine prepare];
+
+    if (!prepared) {
+
+        [inputNode
+            removeTapOnBus:0];
+
+        gEngine =
+            nil;
+
+        SRPopup(
+            @"AVAudioEngine prepare failed.");
+
+        return;
+    }
+
+    BOOL started =
+        [gEngine startAndReturnError:
+            &engineError];
+
+    if (!started) {
+
+        [inputNode
+            removeTapOnBus:0];
+
+        NSString *errorText =
+            engineError.localizedDescription
+            ?: @"Unknown AVAudioEngine error.";
+
+        gEngine =
+            nil;
+
+        SRPopup(
+            [NSString stringWithFormat:
+                @"REALTIME CAPTURE FAILED.\n\n"
+                 "%@",
+                errorText]);
+
+        NSLog(
+            @"[SanneRealtime] ENGINE START FAILED: %@",
+            engineError);
+
+        return;
+    }
+
+    gCaptureRunning =
+        YES;
+
+    NSLog(
+        @"[SanneRealtime] LIVE PCM CAPTURE STARTED");
+
+    SRPopup(
+        [NSString stringWithFormat:
+            @"LIVE CAPTURE STARTED\n\n"
+             "Input channels: %u\n"
+             "Sample rate: %.0f\n\n"
+             "The tap is only measuring live PCM.\n"
+             "No voice conversion yet.\n\n"
+             "The known-good female test will "
+             "play in 2 seconds.",
+            (unsigned)format.channelCount,
+            format.sampleRate]);
+
+    if (!gTestStarted) {
+
+        gTestStarted =
             YES;
 
-        [vc.view addSubview:panel];
+        dispatch_after(
+            dispatch_time(
+                DISPATCH_TIME_NOW,
+                2 * NSEC_PER_SEC),
+            dispatch_get_main_queue(),
+            ^{
 
-        CGFloat textX = 14.0;
-        CGFloat textY = 14.0;
-        CGFloat textWidth = width - 28.0;
-        CGFloat textHeight = height - 28.0;
+                SRSpeakKnownGoodTest();
+            });
+    }
 
-        SRTextView =
-            [[UITextView alloc]
-             initWithFrame:
-             CGRectMake(textX,
-                        textY,
-                        textWidth,
-                        textHeight)];
+    /*
+     Give the capture experiment 8 seconds,
+     then report whether actual PCM arrived.
+    */
 
-        SRTextView.backgroundColor =
-            [UIColor clearColor];
+    dispatch_after(
+        dispatch_time(
+            DISPATCH_TIME_NOW,
+            8 * NSEC_PER_SEC),
+        dispatch_get_main_queue(),
+        ^{
 
-        SRTextView.textColor =
-            [UIColor whiteColor];
+            if (!gCaptureRunning) {
+                return;
+            }
 
-        SRTextView.font =
-            [UIFont fontWithName:@"Menlo"
-                            size:13.0];
+            double duration =
+                session.sampleRate > 0.0
+                ? (double)gCapturedFrames /
+                    session.sampleRate
+                : 0.0;
 
-        SRTextView.editable = NO;
-        SRTextView.selectable = NO;
-        SRTextView.userInteractionEnabled = NO;
-        SRTextView.scrollEnabled = YES;
+            SRPopup(
+                [NSString stringWithFormat:
+                    @"LIVE PCM RESULT\n\n"
+                     "Callbacks: %llu\n"
+                     "Frames: %llu\n"
+                     "Captured seconds: %.2f\n"
+                     "Peak: %.4f\n"
+                     "RMS: %.4f\n\n"
+                     "Call is still being observed.\n"
+                     "No neural conversion yet.",
+                    gCallbackCount,
+                    gCapturedFrames,
+                    duration,
+                    gPeak,
+                    gRMS]);
+        });
+}
 
-        SRTextView.textContainerInset =
-            UIEdgeInsetsMake(4, 4, 4, 4);
+#pragma mark - Stop Capture
 
-        [panel addSubview:SRTextView];
+static void SRStopCapture(void)
+{
+    if (!gEngine) {
+        gCaptureRunning =
+            NO;
 
-        SRLog(@"DIAGNOSTIC OBSERVER STARTED");
-        SRLog(@"NO SESSION ACTIVATION");
-        SRLog(@"NO SESSION DEACTIVATION");
-        SRLog(@"NO CATEGORY CHANGE");
-        SRLog(@"NO MODE CHANGE");
-        SRLog(@"NO ROUTE CHANGE");
-        SRLog(@"NO INJECTION REQUEST");
-        SRLog(@"------------------------------");
+        return;
+    }
 
-        SRSnapshot(@"INITIAL");
-        SRUpdateOverlay();
-    });
+    AVAudioInputNode *inputNode =
+        gEngine.inputNode;
+
+    @try {
+
+        [inputNode
+            removeTapOnBus:0];
+
+    }
+    @catch (__unused NSException *exception) {
+    }
+
+    [gEngine stop];
+
+    gEngine =
+        nil;
+
+    gCaptureRunning =
+        NO;
+
+    NSLog(
+        @"[SanneRealtime] LIVE PCM CAPTURE STOPPED");
+}
+
+#pragma mark - Injection Setup
+
+static void SREnableKnownGoodInjection(void)
+{
+    if (!@available(iOS 18.2, *)) {
+
+        SRPopup(
+            @"iOS 18.2 or newer is required.");
+
+        return;
+    }
+
+    AVAudioApplication *application =
+        [AVAudioApplication sharedInstance];
+
+    AVAudioApplicationMicrophoneInjectionPermission permission =
+        application.microphoneInjectionPermission;
+
+    if (permission !=
+        AVAudioApplicationMicrophoneInjectionPermissionGranted) {
+
+        SRPopup(
+            [NSString stringWithFormat:
+                @"Injection permission is %@.\n\n"
+                 "The known-good injection path "
+                 "cannot be started.",
+                SRPermissionString()]);
+
+        return;
+    }
+
+    AVAudioSession *session =
+        [AVAudioSession sharedInstance];
+
+    if (!session.isMicrophoneInjectionAvailable) {
+
+        SRPopup(
+            @"INJECTION IS CURRENTLY UNAVAILABLE.\n\n"
+             "Start the Nobanny Discord call first.");
+
+        return;
+    }
+
+    NSError *error =
+        nil;
+
+    BOOL success =
+        [session
+            setPreferredMicrophoneInjectionMode:
+                AVAudioSessionMicrophoneInjectionModeSpokenAudio
+            error:&error];
+
+    if (!success) {
+
+        SRPopup(
+            [NSString stringWithFormat:
+                @"SPOKEN AUDIO MODE FAILED.\n\n%@",
+                error.localizedDescription
+                    ?: @"Unknown error."]);
+
+        return;
+    }
+
+    NSLog(
+        @"[SanneRealtime] SPOKEN AUDIO MODE ENABLED");
+
+    /*
+     Start the actual live-input experiment only after
+     the already-proven injection mode is enabled.
+    */
+
+    SRStartCapture();
+}
+
+#pragma mark - Capability Observer
+
+static void SRCapabilityChanged(
+    NSNotification *notification)
+{
+    (void)notification;
+
+    AVAudioSession *session =
+        [AVAudioSession sharedInstance];
+
+    NSLog(
+        @"[SanneRealtime] INJECTION CAPABILITY CHANGED");
+
+    NSLog(
+        @"[SanneRealtime] %@",
+        SRSessionReport());
+
+    if (@available(iOS 18.2, *)) {
+
+        if (session.isMicrophoneInjectionAvailable &&
+            session.isInputAvailable &&
+            session.inputNumberOfChannels > 0) {
+
+            if (!gCaptureRunning) {
+
+                SREnableKnownGoodInjection();
+            }
+        }
+    }
+}
+
+#pragma mark - Route Observer
+
+static void SRRouteChanged(
+    NSNotification *notification)
+{
+    (void)notification;
+
+    NSLog(
+        @"[SanneRealtime] ROUTE CHANGED");
+
+    NSLog(
+        @"[SanneRealtime] %@",
+        SRSessionReport());
+
+    if (!gCaptureRunning &&
+        [AVAudioSession sharedInstance].isInputAvailable &&
+        [AVAudioSession sharedInstance].inputNumberOfChannels > 0 &&
+        [AVAudioSession sharedInstance].isMicrophoneInjectionAvailable) {
+
+        dispatch_after(
+            dispatch_time(
+                DISPATCH_TIME_NOW,
+                500 * NSEC_PER_MSEC),
+            dispatch_get_main_queue(),
+            ^{
+
+                SREnableKnownGoodInjection();
+            });
+    }
+}
+
+#pragma mark - Interruption Observer
+
+static void SRInterruption(
+    NSNotification *notification)
+{
+    NSNumber *typeNumber =
+        notification.userInfo[
+            AVAudioSessionInterruptionTypeKey];
+
+    if (typeNumber &&
+        typeNumber.unsignedIntegerValue ==
+            AVAudioSessionInterruptionTypeBegan) {
+
+        NSLog(
+            @"[SanneRealtime] AUDIO INTERRUPTION BEGAN");
+
+    } else {
+
+        NSLog(
+            @"[SanneRealtime] AUDIO INTERRUPTION ENDED");
+    }
+
+    NSLog(
+        @"[SanneRealtime] %@",
+        SRSessionReport());
+}
+
+#pragma mark - Application State
+
+static void SRApplicationActive(
+    NSNotification *notification)
+{
+    (void)notification;
+
+    NSLog(
+        @"[SanneRealtime] APPLICATION ACTIVE");
+
+    NSLog(
+        @"[SanneRealtime] %@",
+        SRSessionReport());
+}
+
+static void SRApplicationInactive(
+    NSNotification *notification)
+{
+    (void)notification;
+
+    NSLog(
+        @"[SanneRealtime] APPLICATION INACTIVE");
+
+    NSLog(
+        @"[SanneRealtime] %@",
+        SRSessionReport());
 }
 
 #pragma mark - Observers
@@ -529,136 +837,144 @@ static void SRInstallObservers(void)
     NSNotificationCenter *center =
         [NSNotificationCenter defaultCenter];
 
-    [center addObserverForName:
-        UIApplicationDidBecomeActiveNotification
-                        object:nil
-                         queue:[NSOperationQueue mainQueue]
-                    usingBlock:^(NSNotification *n) {
-        SRAppActive(n);
-    }];
+    [center
+        addObserverForName:
+            AVAudioSessionMicrophoneInjectionCapabilitiesChangeNotification
+        object:nil
+        queue:[NSOperationQueue mainQueue]
+        usingBlock:
+        ^(NSNotification *notification) {
 
-    [center addObserverForName:
-        UIApplicationWillResignActiveNotification
-                        object:nil
-                         queue:[NSOperationQueue mainQueue]
-                    usingBlock:^(NSNotification *n) {
-        SRAppInactive(n);
-    }];
-
-    [center addObserverForName:
-        UIApplicationDidEnterBackgroundNotification
-                        object:nil
-                         queue:[NSOperationQueue mainQueue]
-                    usingBlock:^(NSNotification *n) {
-        SRAppBackground(n);
-    }];
-
-    [center addObserverForName:
-        UIApplicationWillEnterForegroundNotification
-                        object:nil
-                         queue:[NSOperationQueue mainQueue]
-                    usingBlock:^(NSNotification *n) {
-        SRAppForeground(n);
-    }];
-
-    AVAudioSession *session =
-        [AVAudioSession sharedInstance];
-
-    [center addObserverForName:
-        AVAudioSessionRouteChangeNotification
-                        object:session
-                         queue:[NSOperationQueue mainQueue]
-                    usingBlock:^(NSNotification *n) {
-        SRRouteChanged(n);
-    }];
-
-    [center addObserverForName:
-        AVAudioSessionInterruptionNotification
-                        object:session
-                         queue:[NSOperationQueue mainQueue]
-                    usingBlock:^(NSNotification *n) {
-        SRInterruption(n);
-    }];
-
-    [center addObserverForName:
-        AVAudioSessionMediaServicesWereResetNotification
-                        object:session
-                         queue:[NSOperationQueue mainQueue]
-                    usingBlock:^(NSNotification *n) {
-        SRMediaReset(n);
-    }];
-
-    [center addObserverForName:
-        AVAudioSessionMediaServicesWereLostNotification
-                        object:session
-                         queue:[NSOperationQueue mainQueue]
-                    usingBlock:^(NSNotification *n) {
-        SRMediaLost(n);
-    }];
-
-    [center addObserverForName:
-        AVAudioSessionMicrophoneInjectionCapabilitiesChangeNotification
-                        object:session
-                         queue:[NSOperationQueue mainQueue]
-                    usingBlock:^(NSNotification *n) {
-        SRInjectionChanged(n);
-    }];
-
-    SRLog(@"OBSERVERS INSTALLED");
-}
-
-#pragma mark - Timer
-
-static void SRStartTimer(void)
-{
-    dispatch_async(dispatch_get_main_queue(), ^{
-
-        if (SRTimer) {
-            [SRTimer invalidate];
-            SRTimer = nil;
-        }
-
-        SRTimer =
-            [NSTimer scheduledTimerWithTimeInterval:0.5
-                                             repeats:YES
-                                               block:^(NSTimer *timer) {
-            (void)timer;
-            SRPoll();
+            SRCapabilityChanged(notification);
         }];
-    });
+
+    [center
+        addObserverForName:
+            AVAudioSessionRouteChangeNotification
+        object:nil
+        queue:[NSOperationQueue mainQueue]
+        usingBlock:
+        ^(NSNotification *notification) {
+
+            SRRouteChanged(notification);
+        }];
+
+    [center
+        addObserverForName:
+            AVAudioSessionInterruptionNotification
+        object:nil
+        queue:[NSOperationQueue mainQueue]
+        usingBlock:
+        ^(NSNotification *notification) {
+
+            SRInterruption(notification);
+        }];
+
+    [center
+        addObserverForName:
+            UIApplicationDidBecomeActiveNotification
+        object:nil
+        queue:[NSOperationQueue mainQueue]
+        usingBlock:
+        ^(NSNotification *notification) {
+
+            SRApplicationActive(notification);
+        }];
+
+    [center
+        addObserverForName:
+            UIApplicationWillResignActiveNotification
+        object:nil
+        queue:[NSOperationQueue mainQueue]
+        usingBlock:
+        ^(NSNotification *notification) {
+
+            SRApplicationInactive(notification);
+        }];
+
+    NSLog(
+        @"[SanneRealtime] OBSERVERS INSTALLED");
 }
 
-#pragma mark - Bootstrap
+#pragma mark - Startup
 
-static void SRBootstrap(void)
+static void SRStartup(void)
 {
-    if (SRInstalled) {
-        return;
-    }
+    NSLog(
+        @"[SanneRealtime] =========================");
 
-    SRInstalled = YES;
+    NSLog(
+        @"[SanneRealtime] SANNE REALTIME CAPTURE BUILD");
 
-    SRLogLines =
-        [NSMutableArray array];
+    NSLog(
+        @"[SanneRealtime] =========================");
 
-    /*
-     IMPORTANT:
-     There is intentionally NO AVAudioSession configuration here.
-    */
+    NSLog(
+        @"[SanneRealtime] %@",
+        SRSessionReport());
 
     SRInstallObservers();
 
-    SRCreateOverlay();
+    /*
+     If the call is already active when the dylib starts,
+     wait for the existing session to expose input/injection.
+    */
 
-    SRStartTimer();
+    dispatch_after(
+        dispatch_time(
+            DISPATCH_TIME_NOW,
+            1500 * NSEC_PER_MSEC),
+        dispatch_get_main_queue(),
+        ^{
+
+            AVAudioSession *session =
+                [AVAudioSession sharedInstance];
+
+            NSLog(
+                @"[SanneRealtime] FIRST CHECK");
+
+            NSLog(
+                @"[SanneRealtime] %@",
+                SRSessionReport());
+
+            if (@available(iOS 18.2, *)) {
+
+                if (session.isMicrophoneInjectionAvailable &&
+                    session.isInputAvailable &&
+                    session.inputNumberOfChannels > 0) {
+
+                    SREnableKnownGoodInjection();
+
+                } else {
+
+                    SRPopup(
+                        [NSString stringWithFormat:
+                            @"Waiting for active Discord audio.\n\n"
+                             "Injection: %@\n"
+                             "Input: %@\n"
+                             "Channels: %ld\n\n"
+                             "Make the Nobanny call now.",
+                            session.isMicrophoneInjectionAvailable
+                                ? @"YES"
+                                : @"NO",
+                            session.isInputAvailable
+                                ? @"YES"
+                                : @"NO",
+                            (long)session.inputNumberOfChannels]);
+                }
+            }
+        });
 }
 
 #pragma mark - Constructor
 
 __attribute__((constructor))
-static void SanneRealtimeLoad(void)
+static void SanneRealtimeLoaded(void)
 {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        SRBootstrap();
-    });
+    dispatch_async(
+        dispatch_get_main_queue(),
+        ^{
+
+            SRStartup();
+        });
 }
