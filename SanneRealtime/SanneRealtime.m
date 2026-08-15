@@ -70,8 +70,7 @@ static NSString *SRRoute(void)
         AVAudioSessionPortDescription *port =
             route.inputs.firstObject;
 
-        input =
-            port.portName ?: @"UNKNOWN";
+        input = port.portName ?: @"UNKNOWN";
     }
 
     if (route.outputs.count > 0) {
@@ -79,8 +78,7 @@ static NSString *SRRoute(void)
         AVAudioSessionPortDescription *port =
             route.outputs.firstObject;
 
-        output =
-            port.portName ?: @"UNKNOWN";
+        output = port.portName ?: @"UNKNOWN";
     }
 
     return [NSString stringWithFormat:
@@ -134,7 +132,7 @@ static void SREvent(NSString *event)
         });
 }
 
-#pragma mark - Overlay
+#pragma mark - Window Scene
 
 static UIWindowScene *SRActiveWindowScene(void)
 {
@@ -158,6 +156,8 @@ static UIWindowScene *SRActiveWindowScene(void)
     return nil;
 }
 
+#pragma mark - Overlay
+
 static void SRCreateOverlay(void)
 {
     dispatch_async(
@@ -173,38 +173,48 @@ static void SRCreateOverlay(void)
 
             if (!scene) {
 
-                SREvent(
-                    @"OVERLAY: waiting for window");
-
                 return;
             }
 
-            CGRect bounds =
+            CGRect screenBounds =
                 scene.screen.bounds;
 
-            /*
-             Small overlay.
+            CGFloat overlayWidth = 282.0;
+            CGFloat overlayHeight = 175.0;
 
-             It does NOT receive touches, so the
-             underlying Nobanny UI remains usable.
-            */
+            CGFloat x =
+                screenBounds.size.width -
+                overlayWidth -
+                10.0;
+
+            CGFloat y = 70.0;
+
+            if (x < 5.0) {
+                x = 5.0;
+            }
 
             SROverlayWindow =
                 [[UIWindow alloc]
-                    initWithFrame:CGRectMake(
-                        bounds.size.width - 292.0,
-                        70.0,
-                        282.0,
-                        175.0)];
+                    initWithWindowScene:scene];
 
-            SROverlayWindow.windowScene =
-                scene;
+            SROverlayWindow.frame =
+                CGRectMake(
+                    x,
+                    y,
+                    overlayWidth,
+                    overlayHeight);
 
             SROverlayWindow.windowLevel =
                 UIWindowLevelAlert + 1;
 
             SROverlayWindow.backgroundColor =
                 [UIColor clearColor];
+
+            /*
+             * Critical:
+             * The diagnostic overlay does NOT receive
+             * touch events. Nobanny remains usable.
+             */
 
             SROverlayWindow.userInteractionEnabled =
                 NO;
@@ -219,10 +229,8 @@ static void SRCreateOverlay(void)
                 controller;
 
             UIView *panel =
-                [[UIView alloc] init];
-
-            panel.frame =
-                controller.view.bounds;
+                [[UIView alloc] initWithFrame:
+                    controller.view.bounds];
 
             panel.autoresizingMask =
                 UIViewAutoresizingFlexibleWidth |
@@ -243,11 +251,16 @@ static void SRCreateOverlay(void)
             SROverlayLabel =
                 [[UILabel alloc] init];
 
+            CGFloat padding = 9.0;
+
             SROverlayLabel.frame =
-                CGRectInset(
-                    panel.bounds,
-                    10.0,
-                    7.0);
+                CGRectMake(
+                    padding,
+                    7.0,
+                    overlayWidth -
+                        (padding * 2.0),
+                    overlayHeight -
+                        14.0);
 
             SROverlayLabel.autoresizingMask =
                 UIViewAutoresizingFlexibleWidth |
@@ -275,16 +288,8 @@ static void SRCreateOverlay(void)
 
             [SROverlayWindow makeKeyAndVisible];
 
-            /*
-             Return key-window status to Nobanny.
-             The overlay itself remains visible.
-            */
-
-            [scene.windows.firstObject
-                makeKeyWindow];
-
             SREvent(
-                @"OVERLAY: READY");
+                @"OVERLAY READY");
 
             SRRefreshOverlay();
         });
@@ -307,10 +312,10 @@ static void SRRefreshOverlay(void)
                 [NSString stringWithFormat:
 
                     @"SANNE REALTIME\n"
-                     "P:%@  I:%@  M:%@\n"
-                     "CAT:%@  IN:%ld  SR:%.0f\n"
-                     "ROUTE: %@\n"
-                     "--------------------\n",
+                     "P:%@ I:%@ M:%@\n"
+                     "CAT:%@ IN:%ld SR:%.0f\n"
+                     "ROUTE:%@\n"
+                     "----------------\n",
 
                     SRPermission(),
 
@@ -330,7 +335,8 @@ static void SRRefreshOverlay(void)
                     SRRoute()];
 
             NSMutableString *text =
-                [NSMutableString stringWithString:current];
+                [NSMutableString stringWithString:
+                    current];
 
             if (SREvents.count == 0) {
 
@@ -499,7 +505,7 @@ static void SRAppInactive(
         @"APP RESIGN ACTIVE");
 }
 
-#pragma mark - Observer Installation
+#pragma mark - Observers
 
 static void SRInstallObservers(void)
 {
@@ -593,17 +599,12 @@ static void SanneRealtimeInit(void)
                     @"NO AVAUDIOENGINE");
 
                 SREvent(
-                    @"NO MIC TAP");
+                    @"NO MICROPHONE TAP");
 
                 SREvent(
                     @"NO SESSION ACTIVATION");
 
                 SRCreateOverlay();
-
-                /*
-                 Retry overlay creation in case the host
-                 application's window is not ready yet.
-                */
 
                 dispatch_after(
                     dispatch_time(
